@@ -546,3 +546,156 @@ fn scan_uri(bytes: &[u8], start: usize) -> Option<usize> {
     (position > body).then_some(position)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(source: &str) -> Vec<SyntaxKind> {
+        tokenize(source).map(Token::kind).collect()
+    }
+
+    #[test]
+    fn tokenizes_keywords_and_operators() {
+        let source = "if x <= 2 && x != 0 then x // y else x |> f";
+        assert_eq!(
+            kinds(source),
+            [
+                SyntaxKind::IfKeyword,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::LessEqual,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Integer,
+                SyntaxKind::Whitespace,
+                SyntaxKind::And,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::NotEqual,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Integer,
+                SyntaxKind::Whitespace,
+                SyntaxKind::ThenKeyword,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Update,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::ElseKeyword,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::PipeInto,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Identifier,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_nested_string_interpolation() {
+        let source = r#""a ${if x then "b ${y}" else z} c""#;
+        let tokens: Vec<_> = tokenize(source).collect();
+        assert_eq!(
+            tokens.first().map(|token| token.kind),
+            Some(SyntaxKind::Quote)
+        );
+        assert_eq!(tokens.last().map(|token| token.kind), Some(SyntaxKind::Eof));
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == SyntaxKind::InterpolationStart)
+                .count(),
+            2
+        );
+        let rebuilt: String = tokens
+            .iter()
+            .filter(|token| token.kind != SyntaxKind::Eof)
+            .map(|token| token.text(source))
+            .collect();
+        assert_eq!(rebuilt, source);
+    }
+
+    #[test]
+    fn tokenizes_indented_string_escapes() {
+        let source = "''a ''${b} ${c} ''' d''";
+        let tokens: Vec<_> = tokenize(source).collect();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == SyntaxKind::InterpolationStart)
+                .count(),
+            1
+        );
+        assert_eq!(tokens[0].kind, SyntaxKind::IndentedQuote);
+        assert_eq!(tokens[tokens.len() - 2].kind, SyntaxKind::IndentedQuote);
+    }
+
+    #[test]
+    fn distinguishes_numbers_paths_and_uris() {
+        assert_eq!(
+            kinds("1 1. .2 0.2 1e3 ./x a/b https://nixos.org <nixpkgs>"),
+            [
+                SyntaxKind::Integer,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Float,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Float,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Float,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Integer,
+                SyntaxKind::Identifier,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Path,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Path,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Uri,
+                SyntaxKind::Whitespace,
+                SyntaxKind::SearchPath,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_interpolated_paths() {
+        let source = "./foo/${bar}/baz";
+        assert_eq!(
+            kinds(source),
+            [
+                SyntaxKind::PathFragment,
+                SyntaxKind::InterpolationStart,
+                SyntaxKind::Identifier,
+                SyntaxKind::RightBrace,
+                SyntaxKind::PathFragment,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_comments_and_invalid_input() {
+        let source = "# one\n/** doc */ /* block */ § \0";
+        assert_eq!(
+            kinds(source),
+            [
+                SyntaxKind::LineComment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::DocComment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::BlockComment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Error,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Error,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+}
