@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{
     Diagnostic, DiagnosticKind, Document, Element, ElementId, ParseOptions, Severity, SyntaxKind,
@@ -142,18 +142,25 @@ fn validate_entries<'doc, 'src: 'doc>(
 ) {
     let mut leaves = Vec::new();
     collect_leaf_paths(entries, &[], is_let, diagnostics, &mut leaves);
-    let mut paths = Vec::new();
+    let mut paths = PathTrie::default();
     for (path, range) in leaves {
-        check_path(&mut paths, path, range, diagnostics);
+        if let Some(kind) = paths.insert(path) {
+            diagnostics.push(Diagnostic::validation(
+                kind,
+                Severity::Error,
+                range,
+                SyntaxKind::AttributePath,
+            ));
+        }
     }
 }
 
 fn collect_leaf_paths<'doc, 'src: 'doc>(
     entries: impl Iterator<Item = AttributeEntry<'doc, 'src>>,
-    prefix: &[String],
+    prefix: &[Cow<'src, str>],
     is_let: bool,
     diagnostics: &mut Vec<Diagnostic>,
-    leaves: &mut Vec<(Vec<String>, crate::TextRange)>,
+    leaves: &mut Vec<(Vec<Cow<'src, str>>, crate::TextRange)>,
 ) {
     for entry in entries {
         match entry {
@@ -185,7 +192,7 @@ fn collect_leaf_paths<'doc, 'src: 'doc>(
                 for name in inherit.identifiers() {
                     let mut full_path = Vec::with_capacity(prefix.len() + 1);
                     full_path.extend_from_slice(prefix);
-                    full_path.push(name.text().to_owned());
+                    full_path.push(Cow::Borrowed(name.text()));
                     leaves.push((full_path, name.range()));
                 }
                 if inherit
@@ -205,20 +212,23 @@ fn collect_leaf_paths<'doc, 'src: 'doc>(
     }
 }
 
-fn static_path(path: AttributePath<'_, '_>) -> Option<Vec<String>> {
+fn static_path<'doc, 'src: 'doc>(path: AttributePath<'doc, 'src>) -> Option<Vec<Cow<'src, str>>> {
     path.components()
         .map(|component| match component {
-            AttributeComponent::Identifier(token) => Some(token.text().to_owned()),
+            AttributeComponent::Identifier(token) => Some(Cow::Borrowed(token.text())),
             AttributeComponent::String(string) => static_string(string.syntax().text()),
             AttributeComponent::Interpolation(_) => None,
         })
         .collect()
 }
 
-fn static_string(text: &str) -> Option<String> {
+fn static_string(text: &str) -> Option<Cow<'_, str>> {
     let body = text.strip_prefix('"')?.strip_suffix('"')?;
     if body.contains("${") {
         return None;
+    }
+    if !body.contains('\\') {
+        return Some(Cow::Borrowed(body));
     }
     let mut result = String::with_capacity(body.len());
     let mut chars = body.chars();
@@ -235,38 +245,33 @@ fn static_string(text: &str) -> Option<String> {
             result.push(character);
         }
     }
-    Some(result)
+    Some(Cow::Owned(result))
 }
 
-fn check_path(
-    paths: &mut Vec<Vec<String>>,
-    path: Vec<String>,
-    range: crate::TextRange,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for previous in paths.iter() {
-        let kind = if previous == &path {
+#[derive(Default)]
+struct PathTrie<'src> {
+    terminal: bool,
+    children: HashMap<Cow<'src, str>, Self>,
+}
+
+impl<'src> PathTrie<'src> {
+    fn insert(&mut self, path: Vec<Cow<'src, str>>) -> Option<DiagnosticKind> {
+        let mut current = self;
+        for component in path {
+            if current.terminal {
+                return Some(DiagnosticKind::ConflictingAttribute);
+            }
+            current = current.children.entry(component).or_default();
+        }
+        if current.terminal {
             Some(DiagnosticKind::DuplicateAttribute)
-        } else if is_prefix(previous, &path) || is_prefix(&path, previous) {
-            Some(DiagnosticKind::ConflictingAttribute)
-        } else {
+        } else if current.children.is_empty() {
+            current.terminal = true;
             None
-        };
-        if let Some(kind) = kind {
-            diagnostics.push(Diagnostic::validation(
-                kind,
-                Severity::Error,
-                range,
-                SyntaxKind::AttributePath,
-            ));
-            return;
+        } else {
+            Some(DiagnosticKind::ConflictingAttribute)
         }
     }
-    paths.push(path);
-}
-
-fn is_prefix(left: &[String], right: &[String]) -> bool {
-    left.len() < right.len() && left.iter().zip(right).all(|(left, right)| left == right)
 }
 
 fn is_finite_float(text: &str) -> bool {
@@ -289,6 +294,7 @@ fn validate_identifiers(
     let mut scope = Scope {
         frames: Vec::new(),
         dynamic: 0,
+        depth: 0,
         additional_globals: options.additional_globals,
     };
     validate_expression(expression, &mut scope, diagnostics);
@@ -297,6 +303,7 @@ fn validate_identifiers(
 struct Scope<'src, 'options> {
     frames: Vec<Vec<Cow<'src, str>>>,
     dynamic: usize,
+    depth: u16,
     additional_globals: &'options [&'options str],
 }
 
@@ -314,6 +321,25 @@ impl Scope<'_, '_> {
 }
 
 fn validate_expression<'doc, 'src: 'doc>(
+    expression: Expression<'doc, 'src>,
+    scope: &mut Scope<'src, '_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if scope.depth == crate::MAX_NESTING_DEPTH {
+        diagnostics.push(Diagnostic::validation(
+            DiagnosticKind::NestingLimit,
+            Severity::Error,
+            expression.syntax().range(),
+            expression.syntax().kind(),
+        ));
+        return;
+    }
+    scope.depth += 1;
+    validate_expression_inner(expression, scope, diagnostics);
+    scope.depth -= 1;
+}
+
+fn validate_expression_inner<'doc, 'src: 'doc>(
     expression: Expression<'doc, 'src>,
     scope: &mut Scope<'src, '_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -614,7 +640,7 @@ fn first_static_component<'doc, 'src: 'doc>(
 ) -> Option<Cow<'src, str>> {
     match path.components().next()? {
         AttributeComponent::Identifier(token) => Some(Cow::Borrowed(token.text())),
-        AttributeComponent::String(string) => static_string(string.syntax().text()).map(Cow::Owned),
+        AttributeComponent::String(string) => static_string(string.syntax().text()),
         AttributeComponent::Interpolation(_) => None,
     }
 }
