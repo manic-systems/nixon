@@ -50,6 +50,8 @@ pub enum DiagnosticKind {
     InvalidToken,
     /// Valid input followed the complete root expression.
     TrailingInput,
+    /// The expression exceeds Nixon's safe recursive nesting limit.
+    NestingLimit,
     /// An experimental syntax feature is disabled.
     ExperimentalFeatureDisabled,
     /// A URI literal is discouraged or disabled.
@@ -158,6 +160,9 @@ impl fmt::Display for Diagnostic {
             (DiagnosticKind::InvalidToken, _) => formatter.write_str("invalid Nix token"),
             (DiagnosticKind::TrailingInput, _) => {
                 formatter.write_str("unexpected input after the root expression")
+            }
+            (DiagnosticKind::NestingLimit, _) => {
+                formatter.write_str("expression nesting limit exceeded")
             }
             (DiagnosticKind::ExperimentalFeatureDisabled, _) => {
                 formatter.write_str("experimental pipe operators are disabled")

@@ -87,6 +87,7 @@ struct Parser<'src> {
     trivia: Vec<Token>,
     events: Vec<Event>,
     diagnostics: Vec<Diagnostic>,
+    depth: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +108,7 @@ impl<'src> Parser<'src> {
             trivia,
             events: Vec::new(),
             diagnostics: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -127,7 +129,12 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_expression(&mut self) -> CompletedMarker {
-        self.parse_function()
+        if !self.enter_nesting() {
+            return self.nesting_error();
+        }
+        let expression = self.parse_function();
+        self.depth -= 1;
+        expression
     }
 
     fn parse_function(&mut self) -> CompletedMarker {
@@ -135,7 +142,7 @@ impl<'src> Parser<'src> {
             let marker = self.start();
             self.bump();
             self.bump();
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::Lambda);
         }
         if self.at(SyntaxKind::Identifier)
@@ -147,7 +154,7 @@ impl<'src> Parser<'src> {
             self.bump();
             self.parse_formal_set();
             self.expect(SyntaxKind::Colon);
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::Lambda);
         }
         if self.at(SyntaxKind::LeftBrace) && self.looks_like_formal_set() {
@@ -157,7 +164,7 @@ impl<'src> Parser<'src> {
                 self.expect(SyntaxKind::Identifier);
             }
             self.expect(SyntaxKind::Colon);
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::Lambda);
         }
         if self.at(SyntaxKind::AssertKeyword) {
@@ -165,7 +172,7 @@ impl<'src> Parser<'src> {
             self.bump();
             self.parse_expression();
             self.expect(SyntaxKind::Semicolon);
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::Assert);
         }
         if self.at(SyntaxKind::WithKeyword) {
@@ -173,7 +180,7 @@ impl<'src> Parser<'src> {
             self.bump();
             self.parse_expression();
             self.expect(SyntaxKind::Semicolon);
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::With);
         }
         if self.at(SyntaxKind::LetKeyword) && self.nth_kind(1) != SyntaxKind::LeftBrace {
@@ -181,7 +188,7 @@ impl<'src> Parser<'src> {
             self.bump();
             self.parse_bindings(SyntaxKind::InKeyword);
             self.expect(SyntaxKind::InKeyword);
-            self.parse_function();
+            self.parse_expression();
             return self.complete(marker, SyntaxKind::LetIn);
         }
         self.parse_if()
@@ -227,6 +234,15 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_operator(&mut self, minimum: u8) -> CompletedMarker {
+        if !self.enter_nesting() {
+            return self.nesting_error();
+        }
+        let expression = self.parse_operator_inner(minimum);
+        self.depth -= 1;
+        expression
+    }
+
+    fn parse_operator_inner(&mut self, minimum: u8) -> CompletedMarker {
         let mut left = if matches!(self.current.kind(), SyntaxKind::Bang | SyntaxKind::Minus) {
             let marker = self.start();
             let binding = if self.at(SyntaxKind::Bang) { 7 } else { 12 };
@@ -273,6 +289,15 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_select(&mut self) -> CompletedMarker {
+        if !self.enter_nesting() {
+            return self.nesting_error();
+        }
+        let expression = self.parse_select_inner();
+        self.depth -= 1;
+        expression
+    }
+
+    fn parse_select_inner(&mut self) -> CompletedMarker {
         let mut expression = self.parse_primary();
         if self.eat(SyntaxKind::Dot) {
             let marker = self.precede(expression);
@@ -598,6 +623,20 @@ impl<'src> Parser<'src> {
         ));
         self.bump();
     }
+
+    fn enter_nesting(&mut self) -> bool {
+        if self.depth == crate::MAX_NESTING_DEPTH {
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    fn nesting_error(&mut self) -> CompletedMarker {
+        let marker = self.start();
+        self.error_and_bump(DiagnosticKind::NestingLimit);
+        self.complete(marker, SyntaxKind::ErrorNode)
+    }
 }
 
 fn next_significant(tokenizer: &mut Tokenizer<'_>, trivia: &mut Vec<Token>) -> Token {
@@ -732,5 +771,18 @@ mod tests {
             parse_bytes(&[0xff]),
             Err(InputError::InvalidUtf8 { valid_up_to: 0 })
         ));
+    }
+
+    #[test]
+    fn bounds_recursive_nesting_without_losing_source() {
+        let source = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let document = parse(&source).expect("small UTF-8 fixture");
+        assert_eq!(document.root().text(), source);
+        assert!(
+            document
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == DiagnosticKind::NestingLimit)
+        );
     }
 }
