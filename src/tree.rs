@@ -10,7 +10,9 @@ const NONE: u32 = u32::MAX;
 pub struct ElementId(u32);
 
 impl ElementId {
-    pub(crate) const fn new(value: u32) -> Self {
+    /// Creates an identifier from its compact numeric representation.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
@@ -179,6 +181,15 @@ impl<'doc, 'src> Element<'doc, 'src> {
         match self {
             Self::Node(node) => node.text(),
             Self::Token(token) => token.text(),
+        }
+    }
+
+    /// Returns the parent node, or `None` for the root.
+    #[must_use]
+    pub fn parent(self) -> Option<Node<'doc, 'src>> {
+        match self {
+            Self::Node(node) => node.parent(),
+            Self::Token(token) => Some(token.parent()),
         }
     }
 }

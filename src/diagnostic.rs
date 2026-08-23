@@ -30,6 +30,7 @@ impl std::error::Error for InputError {}
 
 /// The severity of a parse diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum Severity {
     /// The source is not a valid Nix expression.
     Error,
