@@ -5,6 +5,7 @@
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "nixon";
   version = "0.1.0";
+  __structuredAttrs = true;
 
   src = let
     fs = lib.fileset;
@@ -13,13 +14,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
     fs.toSource {
       root = s;
       fileset = fs.unions [
-        (fs.fileFilter (file: builtins.any file.hasExt ["rs"]) (s + /src))
-        (fs.fileFilter (file: builtins.any file.hasExt ["rs"]) (s + /tests))
-        (fs.fileFilter (file: builtins.any file.hasExt ["rs"]) (s + /wasm))
+        (s + /src)
+        (s + /wasm)
+        (s + /tests)
+
         (s + /Cargo.lock)
         (s + /Cargo.toml)
-        (s + /wasm/Cargo.toml)
-        (s + /LICENSE)
         (s + /README.md)
       ];
     };

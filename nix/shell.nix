@@ -35,10 +35,11 @@ mkShell {
 
     # NixEL's generated C++ binding.
     llvmPackages.libclang
+    llvmPackages.lld
 
     # LSP
     rust-analyzer
   ];
 
-  LIBCLANG_PATH = lib.makeLibraryPath [llvmPackages.libclang.lib];
+  env.LIBCLANG_PATH = lib.makeLibraryPath [llvmPackages.libclang.lib];
 }

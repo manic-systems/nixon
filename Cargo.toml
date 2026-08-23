@@ -8,6 +8,10 @@ license = "EUPL-1.2"
 repository = "https://github.com/manic-systems/nixon"
 keywords = ["nix", "parser", "syntax", "wasm"]
 categories = ["parser-implementations", "development-tools"]
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--generate-link-to-definition"]
 
 [dependencies]
 

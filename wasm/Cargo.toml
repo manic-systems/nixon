@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nixon = { path = ".." }
-wasm-bindgen = "0.2"
+wasm-bindgen = "=0.2.121"
 
 [lints]
 workspace = true
