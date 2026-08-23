@@ -1,0 +1,42 @@
+[package]
+name = "nixon"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "A small, lossless parser for the Nix language"
+license = "EUPL-1.2"
+repository = "https://github.com/manic-systems/nixon"
+keywords = ["nix", "parser", "syntax", "wasm"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+
+[workspace]
+members = ["wasm"]
+resolver = "3"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
+
+[lints]
+workspace = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false
