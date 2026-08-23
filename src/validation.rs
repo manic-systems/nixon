@@ -744,3 +744,75 @@ const BASE_GLOBALS: &[&str] = &[
     "true",
 ];
 
+#[cfg(test)]
+mod tests {
+    use super::BASE_GLOBALS;
+    use crate::{DiagnosticKind, ParseOptions, UrlLiteralPolicy, parse, parse_with_options};
+
+    fn has(source: &str, kind: DiagnosticKind) -> bool {
+        parse(source)
+            .expect("small source")
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == kind)
+    }
+
+    #[test]
+    fn checks_formals_and_attribute_paths() {
+        assert!(has("{ x, x }: x", DiagnosticKind::DuplicateFormal));
+        assert!(has("x@{ x }: x", DiagnosticKind::DuplicateFormal));
+        assert!(has("{ a = 1; a = 2; }", DiagnosticKind::DuplicateAttribute));
+        assert!(has(
+            "{ a = 1; a.b = 2; }",
+            DiagnosticKind::ConflictingAttribute
+        ));
+    }
+
+    #[test]
+    fn checks_numeric_and_path_limits() {
+        assert!(has("9223372036854775808", DiagnosticKind::IntegerOverflow));
+        assert!(has("1.0e999", DiagnosticKind::FloatOutOfRange));
+        assert!(has("./foo/", DiagnosticKind::TrailingSlashPath));
+    }
+
+    #[test]
+    fn honors_feature_and_uri_options() {
+        assert!(has("x |> f", DiagnosticKind::ExperimentalFeatureDisabled));
+        let options = ParseOptions {
+            pipe_operators: true,
+            uri_literals: UrlLiteralPolicy::Allow,
+            validate_identifiers: false,
+            ..ParseOptions::default()
+        };
+        assert!(
+            parse_with_options("x |> f", options)
+                .expect("small source")
+                .is_valid()
+        );
+    }
+
+    #[test]
+    fn resolves_static_scopes() {
+        assert!(has("missing", DiagnosticKind::UndefinedVariable));
+        assert!(
+            parse("let x = y; y = 1; in x")
+                .expect("small source")
+                .is_valid()
+        );
+        assert!(parse("{ x, y ? x }: y").expect("small source").is_valid());
+        assert!(
+            parse("with builtins; unknownName")
+                .expect("small source")
+                .is_valid()
+        );
+        assert!(has(
+            "with missing; unknownName",
+            DiagnosticKind::UndefinedVariable
+        ));
+    }
+
+    #[test]
+    fn base_globals_are_sorted() {
+        assert!(BASE_GLOBALS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}
