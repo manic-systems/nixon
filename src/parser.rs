@@ -608,3 +608,73 @@ fn starts_attribute(kind: SyntaxKind) -> bool {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Element;
+
+    fn assert_valid(source: &str) -> Document<'_> {
+        let document = parse(source).expect("small UTF-8 fixture");
+        assert!(document.is_valid(), "{:#?}", document.diagnostics());
+        assert_eq!(document.root().text(), source);
+        document
+    }
+
+    fn child_node_kinds(document: &Document<'_>) -> Vec<SyntaxKind> {
+        document
+            .root()
+            .children()
+            .filter_map(|element| match element {
+                Element::Node(node) => Some(node.kind()),
+                Element::Token(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parses_operator_precedence() {
+        let document = assert_valid("1 + 2 * 3 == 7 -> true");
+        assert_eq!(child_node_kinds(&document), [SyntaxKind::BinaryOperation]);
+    }
+
+    #[test]
+    fn parses_functions_and_formals() {
+        assert_valid("x: x");
+        assert_valid("{ x, y ? 1, ... }@args: x + y");
+        assert_valid("args@{ x, y }: x");
+    }
+
+    #[test]
+    fn parses_bindings_and_inherits() {
+        assert_valid("rec { a.b = 1; inherit a; inherit (source) x y; }");
+        assert_valid("let x = 1; y = x + 1; in y");
+        assert_valid("let { body = 1; }");
+    }
+
+    #[test]
+    fn parses_strings_paths_lists_and_selection() {
+        assert_valid(r#"[ "a ${x}" ./foo/${bar}/baz set.a.b or null ]"#);
+    }
+
+    #[test]
+    fn parses_control_flow() {
+        assert_valid("with scope; assert value != null; if ok then f x else y");
+    }
+
+    #[test]
+    fn retains_malformed_source() {
+        let source = "{ x = [ 1 2; } trailing";
+        let document = parse(source).expect("small UTF-8 fixture");
+        assert!(!document.is_valid());
+        assert_eq!(document.root().text(), source);
+        assert!(!document.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_utf8() {
+        assert!(matches!(
+            parse_bytes(&[0xff]),
+            Err(InputError::InvalidUtf8 { valid_up_to: 0 })
+        ));
+    }
+}
