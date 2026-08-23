@@ -8,6 +8,13 @@ pub struct Token {
 }
 
 impl Token {
+    pub(crate) const fn eof(position: TextSize) -> Self {
+        Self {
+            kind: SyntaxKind::Eof,
+            range: TextRange::new(position, position),
+        }
+    }
+
     /// Returns the token's lexical kind.
     #[must_use]
     pub const fn kind(self) -> SyntaxKind {
