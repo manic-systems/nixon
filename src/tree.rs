@@ -243,6 +243,21 @@ impl<'doc, 'src> Node<'doc, 'src> {
             Element::Token(_) => None,
         })
     }
+
+    /// Returns the first immediate child node with `kind`.
+    #[must_use]
+    pub fn child(self, kind: SyntaxKind) -> Option<Self> {
+        self.child_nodes().find(|node| node.kind() == kind)
+    }
+
+    /// Returns the first immediate token with `kind`.
+    #[must_use]
+    pub fn token(self, kind: SyntaxKind) -> Option<TokenNode<'doc, 'src>> {
+        self.children().find_map(|element| match element {
+            Element::Token(token) if token.kind() == kind => Some(token),
+            Element::Node(_) | Element::Token(_) => None,
+        })
+    }
 }
 
 /// A lexical token in a parsed document.

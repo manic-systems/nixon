@@ -1,5 +1,6 @@
 //! A small, lossless parser for the Nix language.
 
+pub mod ast;
 mod diagnostic;
 mod kind;
 mod lexer;
