@@ -1,3 +1,5 @@
 /target
+/benchmarks/target
+/fuzz/target
 /result
 *.profraw

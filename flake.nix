@@ -1,5 +1,5 @@
 {
-  description = "Rust Project Template";
+  description = "Nixon, a compact lossless parser for the Nix language";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
 
   outputs = {
@@ -11,13 +11,19 @@
     pkgsForEach = nixpkgs.legacyPackages;
   in {
     packages = forEachSystem (system: {
-      default = pkgsForEach.${system}.callPackage ./nix/package.nix {};
+      nixon = pkgsForEach.${system}.callPackage ./nix/package.nix {};
+      default = self.packages.${system}.nixon;
+    });
+
+    checks = forEachSystem (system: {
+      package = self.packages.${system}.default;
     });
 
     devShells = forEachSystem (system: {
       default = pkgsForEach.${system}.callPackage ./nix/shell.nix {};
     });
 
-    hydraJobs = self.packages;
+    formatter = forEachSystem (system: pkgsForEach.${system}.alejandra); # soon...
+    hydraJobs = self.checks;
   };
 }
