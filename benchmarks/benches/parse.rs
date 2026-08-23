@@ -1,5 +1,4 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use nixon::{ParseOptions, UrlLiteralPolicy};
 use nixon_competitors::cases;
 
 fn benchmarks(criterion: &mut Criterion) {
@@ -10,16 +9,8 @@ fn benchmarks(criterion: &mut Criterion) {
             BenchmarkId::new("nixon", case.source.len()),
             &case.source,
             |bencher, source| {
-                let options = ParseOptions {
-                    uri_literals: UrlLiteralPolicy::Allow,
-                    validate_identifiers: false,
-                    ..ParseOptions::default()
-                };
                 bencher.iter(|| {
-                    std::hint::black_box(nixon::parse_with_options(
-                        std::hint::black_box(source),
-                        options,
-                    ))
+                    std::hint::black_box(nixon::parse_syntax(std::hint::black_box(source)))
                 });
             },
         );

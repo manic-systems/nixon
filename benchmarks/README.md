@@ -18,18 +18,33 @@ Run the benchmark from the repository root:
 $ cargo bench --manifest-path benchmarks/Cargo.toml --bench parse
 ```
 
-The timed code excludes file I/O and keeps each complete parse result alive.
-NixEL takes ownership of its input, so its timed call includes the required
-`String` clone.
-
-## Binaries
-
-The crate also provides one small adapter for each parser:
+## Binary size
 
 ```sh
-# Build the stripped release adapters.
+# Build one stripped release binary for each parser.
 $ cargo build --manifest-path benchmarks/Cargo.toml --release --bins
 ```
 
-Each adapter accepts `tiny`, `interpolation`, `module`, `large`, or a path to a
+The binaries accept `tiny`, `interpolation`, `module`, `large`, or a path to a
 Nix file.
+
+## Peak heap
+
+```sh
+# Profile Nixon while it parses the generated large input.
+$ valgrind --tool=massif --massif-out-file=nixon.massif \
+    benchmarks/target/release/nixon large
+```
+
+Replace `nixon` with `rnix` or `nixel` to profile the other parsers.
+
+## Method
+
+Each timed call builds a complete syntax tree. File I/O is excluded. Nixon uses
+`parse_syntax`; `parse` also runs semantic validation that the other parser APIs
+do not provide. NixEL consumes a `String`, so its timed call includes the
+required clone.
+
+## Results
+
+See the recorded [2026-08-23 results](results/2026-08-23.md).

@@ -1,6 +1,6 @@
 //! Inputs shared by the parser benchmarks.
 
-use std::fmt::Write;
+use std::{ffi::OsStr, fmt::Write, fs, io};
 
 /// One fixed benchmark input.
 pub struct Case {
@@ -12,24 +12,42 @@ pub struct Case {
 
 /// Returns the built-in benchmark inputs.
 pub fn cases() -> Vec<Case> {
-    vec![
-        Case {
+    ["tiny", "interpolation", "module", "large"]
+        .into_iter()
+        .map(|name| case(name).expect("known benchmark case"))
+        .collect()
+}
+
+/// Returns a built-in benchmark input by name.
+pub fn case(name: &str) -> Option<Case> {
+    Some(match name {
+        "tiny" => Case {
             name: "tiny",
             source: "let x = 1; in x + 2".to_owned(),
         },
-        Case {
+        "interpolation" => Case {
             name: "interpolation",
             source: interpolation_case(),
         },
-        Case {
+        "module" => Case {
             name: "module",
             source: module_case(128),
         },
-        Case {
+        "large" => Case {
             name: "large",
             source: module_case(4_096),
         },
-    ]
+        _ => return None,
+    })
+}
+
+/// Loads a named benchmark case or a UTF-8 file path.
+pub fn load(argument: &OsStr) -> io::Result<String> {
+    if let Some(case) = argument.to_str().and_then(case) {
+        Ok(case.source)
+    } else {
+        fs::read_to_string(argument)
+    }
 }
 
 fn interpolation_case() -> String {

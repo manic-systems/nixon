@@ -1,11 +1,13 @@
-use std::{env, fs, hint::black_box, process::ExitCode};
+use std::{env, hint::black_box, process::ExitCode};
+
+use nixon_competitors::load;
 
 fn main() -> ExitCode {
     let Some(path) = env::args_os().nth(1) else {
-        eprintln!("usage: nixel <file>");
+        eprintln!("usage: nixel <tiny|interpolation|module|large|file>");
         return ExitCode::FAILURE;
     };
-    let source = match fs::read_to_string(path) {
+    let source = match load(&path) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
