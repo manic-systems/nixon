@@ -23,11 +23,11 @@ impl ElementId {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RawElement {
-    kind: SyntaxKind,
-    range: TextRange,
-    parent: u32,
-    first_child: u32,
-    next_sibling: u32,
+    pub(crate) kind: SyntaxKind,
+    pub(crate) range: TextRange,
+    pub(crate) parent: u32,
+    pub(crate) first_child: u32,
+    pub(crate) next_sibling: u32,
 }
 
 const _: () = assert!(size_of::<RawElement>() <= 24);
@@ -121,8 +121,18 @@ impl<'src> Document<'src> {
             .all(|diagnostic| diagnostic.severity() != Severity::Error)
     }
 
-    fn raw(&self, id: ElementId) -> &RawElement {
+    pub(crate) fn raw(&self, id: ElementId) -> &RawElement {
         &self.elements[id.0 as usize]
+    }
+
+    pub(crate) fn push_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        if diagnostics.is_empty() {
+            return;
+        }
+        let mut combined = Vec::with_capacity(self.diagnostics.len() + diagnostics.len());
+        combined.extend_from_slice(&self.diagnostics);
+        combined.extend(diagnostics);
+        self.diagnostics = combined.into_boxed_slice();
     }
 }
 

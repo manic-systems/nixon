@@ -3,6 +3,42 @@ use crate::{
     tree::{Event, build_tree},
 };
 
+/// Controls syntax features and validation performed during parsing.
+#[derive(Clone, Copy, Debug)]
+pub struct ParseOptions<'a> {
+    /// Accept the experimental `<|` and `|>` operators.
+    pub pipe_operators: bool,
+    /// Controls diagnostics for legacy URI literals.
+    pub uri_literals: UrlLiteralPolicy,
+    /// Additional identifiers available in the root static scope.
+    pub additional_globals: &'a [&'a str],
+    /// Check identifier resolution against the Nix 2.35 base scope.
+    pub validate_identifiers: bool,
+}
+
+impl Default for ParseOptions<'_> {
+    fn default() -> Self {
+        Self {
+            pipe_operators: false,
+            uri_literals: UrlLiteralPolicy::Warn,
+            additional_globals: &[],
+            validate_identifiers: true,
+        }
+    }
+}
+
+/// Controls how legacy URI literals are diagnosed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UrlLiteralPolicy {
+    /// Accept URI literals without a diagnostic.
+    Allow,
+    /// Accept URI literals with a warning.
+    #[default]
+    Warn,
+    /// Reject URI literals.
+    Deny,
+}
+
 /// Parses one UTF-8 Nix expression.
 ///
 /// # Errors
@@ -10,10 +46,26 @@ use crate::{
 /// Returns [`InputError::TooLarge`] when the source cannot be represented with
 /// compact offsets. Syntax errors are retained in the returned document.
 pub fn parse(source: &str) -> Result<Document<'_>, InputError> {
+    parse_with_options(source, ParseOptions::default())
+}
+
+/// Parses one Nix expression with explicit feature and validation settings.
+///
+/// # Errors
+///
+/// Returns [`InputError::TooLarge`] when the source cannot be represented with
+/// compact offsets. Syntax and validation errors remain in the document.
+pub fn parse_with_options<'src>(
+    source: &'src str,
+    options: ParseOptions<'_>,
+) -> Result<Document<'src>, InputError> {
     if source.len() > u32::MAX as usize {
         return Err(InputError::TooLarge);
     }
-    Ok(Parser::new(source).parse())
+    let mut document = Parser::new(source).parse();
+    let diagnostics = crate::validation::validate(&document, options);
+    document.push_diagnostics(diagnostics);
+    Ok(document)
 }
 
 /// Validates UTF-8 and parses one Nix expression from bytes.
@@ -646,19 +698,23 @@ mod tests {
 
     #[test]
     fn parses_bindings_and_inherits() {
-        assert_valid("rec { a.b = 1; inherit a; inherit (source) x y; }");
+        assert_valid("rec { a.b = 1; inherit true; inherit (builtins) head tail; }");
         assert_valid("let x = 1; y = x + 1; in y");
         assert_valid("let { body = 1; }");
     }
 
     #[test]
     fn parses_strings_paths_lists_and_selection() {
-        assert_valid(r#"[ "a ${x}" ./foo/${bar}/baz set.a.b or null ]"#);
+        assert_valid(
+            r#"let x = 1; bar = "b"; set = { a.b = 2; }; in [ "a ${x}" ./foo/${bar}/baz set.a.b or null ]"#,
+        );
     }
 
     #[test]
     fn parses_control_flow() {
-        assert_valid("with scope; assert value != null; if ok then f x else y");
+        assert_valid(
+            "with builtins; assert true != null; if true then map toString [ 1 ] else false",
+        );
     }
 
     #[test]

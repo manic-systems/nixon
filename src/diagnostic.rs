@@ -49,6 +49,28 @@ pub enum DiagnosticKind {
     InvalidToken,
     /// Valid input followed the complete root expression.
     TrailingInput,
+    /// An experimental syntax feature is disabled.
+    ExperimentalFeatureDisabled,
+    /// A URI literal is discouraged or disabled.
+    UriLiteral,
+    /// An integer literal is outside Nix's signed 64-bit range.
+    IntegerOverflow,
+    /// A floating-point literal is outside the finite range.
+    FloatOutOfRange,
+    /// A path literal ends with a slash.
+    TrailingSlashPath,
+    /// A function formal is declared more than once.
+    DuplicateFormal,
+    /// An attribute is bound more than once.
+    DuplicateAttribute,
+    /// A binding conflicts with a nested attribute path.
+    ConflictingAttribute,
+    /// A dynamic attribute occurs in a `let` binding.
+    DynamicAttributeInLet,
+    /// A dynamic attribute occurs in an `inherit` clause.
+    DynamicAttributeInInherit,
+    /// An identifier is not defined in the current static scope.
+    UndefinedVariable,
 }
 
 /// A syntax or validation problem found while parsing.
@@ -73,6 +95,21 @@ impl Diagnostic {
             severity: Severity::Error,
             range,
             expected,
+            found,
+        }
+    }
+
+    pub(crate) const fn validation(
+        kind: DiagnosticKind,
+        severity: Severity,
+        range: TextRange,
+        found: SyntaxKind,
+    ) -> Self {
+        Self {
+            kind,
+            severity,
+            range,
+            expected: None,
             found,
         }
     }
@@ -121,6 +158,35 @@ impl fmt::Display for Diagnostic {
             (DiagnosticKind::TrailingInput, _) => {
                 formatter.write_str("unexpected input after the root expression")
             }
+            (DiagnosticKind::ExperimentalFeatureDisabled, _) => {
+                formatter.write_str("experimental pipe operators are disabled")
+            }
+            (DiagnosticKind::UriLiteral, _) => formatter.write_str("URI literals are discouraged"),
+            (DiagnosticKind::IntegerOverflow, _) => {
+                formatter.write_str("integer literal is outside the signed 64-bit range")
+            }
+            (DiagnosticKind::FloatOutOfRange, _) => {
+                formatter.write_str("floating-point literal is outside the finite range")
+            }
+            (DiagnosticKind::TrailingSlashPath, _) => {
+                formatter.write_str("path literal has a trailing slash")
+            }
+            (DiagnosticKind::DuplicateFormal, _) => {
+                formatter.write_str("function formal is declared more than once")
+            }
+            (DiagnosticKind::DuplicateAttribute, _) => {
+                formatter.write_str("attribute is already defined")
+            }
+            (DiagnosticKind::ConflictingAttribute, _) => {
+                formatter.write_str("attribute conflicts with a nested binding")
+            }
+            (DiagnosticKind::DynamicAttributeInLet, _) => {
+                formatter.write_str("dynamic attributes are not allowed in let bindings")
+            }
+            (DiagnosticKind::DynamicAttributeInInherit, _) => {
+                formatter.write_str("dynamic attributes are not allowed in inherit clauses")
+            }
+            (DiagnosticKind::UndefinedVariable, _) => formatter.write_str("undefined variable"),
             _ => formatter.write_str("invalid Nix syntax"),
         }
     }
