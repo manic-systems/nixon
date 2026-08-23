@@ -1,6 +1,6 @@
 use crate::{
     Diagnostic, DiagnosticKind, Document, InputError, SyntaxKind, TextSize, Token, Tokenizer,
-    tree::{Event, build_tree},
+    tree::{Event, EventBuffer, build_tree},
 };
 
 /// Controls syntax features and validation performed during parsing.
@@ -49,6 +49,22 @@ pub fn parse(source: &str) -> Result<Document<'_>, InputError> {
     parse_with_options(source, ParseOptions::default())
 }
 
+/// Parses the lossless grammar without Nix's parse-time semantic checks.
+///
+/// Use [`parse`] or [`parse_with_options`] to check duplicate bindings, literal
+/// ranges, feature switches, and identifier resolution.
+///
+/// # Errors
+///
+/// Returns [`InputError::TooLarge`] when the source cannot be represented with
+/// compact offsets. Syntax errors are retained in the returned document.
+pub fn parse_syntax(source: &str) -> Result<Document<'_>, InputError> {
+    if source.len() > u32::MAX as usize {
+        return Err(InputError::TooLarge);
+    }
+    Parser::new(source).parse()
+}
+
 /// Parses one Nix expression with explicit feature and validation settings.
 ///
 /// # Errors
@@ -59,10 +75,7 @@ pub fn parse_with_options<'src>(
     source: &'src str,
     options: ParseOptions<'_>,
 ) -> Result<Document<'src>, InputError> {
-    if source.len() > u32::MAX as usize {
-        return Err(InputError::TooLarge);
-    }
-    let mut document = Parser::new(source).parse();
+    let mut document = parse_syntax(source)?;
     let diagnostics = crate::validation::validate(&document, options);
     document.push_diagnostics(diagnostics);
     Ok(document)
@@ -85,7 +98,7 @@ struct Parser<'src> {
     tokenizer: Tokenizer<'src>,
     current: Token,
     trivia: Vec<Token>,
-    events: Vec<Event>,
+    events: EventBuffer,
     diagnostics: Vec<Diagnostic>,
     depth: u16,
 }
@@ -106,13 +119,13 @@ impl<'src> Parser<'src> {
             tokenizer,
             current,
             trivia,
-            events: Vec::new(),
+            events: EventBuffer::with_source_capacity(source.len()),
             diagnostics: Vec::new(),
             depth: 0,
         }
     }
 
-    fn parse(mut self) -> Document<'src> {
+    fn parse(mut self) -> Result<Document<'src>, InputError> {
         let root = self.start();
         if !self.at(SyntaxKind::Eof) {
             self.parse_expression();
@@ -124,8 +137,8 @@ impl<'src> Parser<'src> {
         }
         self.flush_trivia();
         self.complete(root, SyntaxKind::Root);
-        let elements = build_tree(&mut self.events);
-        Document::new(self.source, elements, self.diagnostics)
+        let elements = build_tree(&mut self.events)?;
+        Ok(Document::new(self.source, elements, self.diagnostics))
     }
 
     fn parse_expression(&mut self) -> CompletedMarker {
@@ -507,24 +520,15 @@ impl<'src> Parser<'src> {
     }
 
     fn looks_like_formal_set(&self) -> bool {
-        let mut depth = 0_u32;
-        let mut tokens = core::iter::once(self.current).chain(self.tokenizer.clone());
-        for token in tokens.by_ref().filter(|token| !token.kind().is_trivia()) {
-            match token.kind() {
-                SyntaxKind::LeftBrace => depth += 1,
-                SyntaxKind::RightBrace => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return tokens.find(|token| !token.kind().is_trivia()).is_some_and(
-                            |token| matches!(token.kind(), SyntaxKind::Colon | SyntaxKind::At),
-                        );
-                    }
-                }
-                SyntaxKind::Eof => break,
-                _ => {}
+        match (self.nth_kind(1), self.nth_kind(2), self.nth_kind(3)) {
+            (SyntaxKind::Identifier, SyntaxKind::Comma | SyntaxKind::Question, _) => true,
+            (SyntaxKind::Identifier, SyntaxKind::RightBrace, after)
+            | (SyntaxKind::Ellipsis, SyntaxKind::RightBrace, after)
+            | (SyntaxKind::RightBrace, after, _) => {
+                matches!(after, SyntaxKind::Colon | SyntaxKind::At)
             }
+            _ => false,
         }
-        false
     }
 
     fn nth_kind(&self, index: usize) -> SyntaxKind {
@@ -540,31 +544,21 @@ impl<'src> Parser<'src> {
 
     fn start(&mut self) -> Marker {
         let position = self.events.len();
-        self.events.push(Event::Start {
-            kind: None,
-            forward_parent: None,
-        });
+        self.events.push(Event::start());
         Marker(position)
     }
 
     fn complete(&mut self, marker: Marker, kind: SyntaxKind) -> CompletedMarker {
-        let Event::Start {
-            kind: event_kind, ..
-        } = &mut self.events[marker.0]
-        else {
-            unreachable!("marker did not point to a start event")
-        };
-        *event_kind = Some(kind);
-        self.events.push(Event::Finish);
+        self.events.get_mut(marker.0).set_start_kind(kind);
+        self.events.push(Event::finish());
         CompletedMarker(marker.0)
     }
 
     fn precede(&mut self, completed: CompletedMarker) -> Marker {
         let marker = self.start();
-        let Event::Start { forward_parent, .. } = &mut self.events[completed.0] else {
-            unreachable!("completed marker did not point to a start event")
-        };
-        *forward_parent = Some(marker.0 - completed.0);
+        self.events
+            .get_mut(completed.0)
+            .set_forward_parent(marker.0 - completed.0);
         marker
     }
 
@@ -590,14 +584,16 @@ impl<'src> Parser<'src> {
     fn bump(&mut self) {
         self.flush_trivia();
         if !self.at(SyntaxKind::Eof) {
-            self.events.push(Event::Token(self.current));
+            self.events.push(Event::token(self.current));
             self.trivia.clear();
             self.current = next_significant(&mut self.tokenizer, &mut self.trivia);
         }
     }
 
     fn flush_trivia(&mut self) {
-        self.events.extend(self.trivia.drain(..).map(Event::Token));
+        for token in self.trivia.drain(..) {
+            self.events.push(Event::token(token));
+        }
     }
 
     fn error_expected(&mut self, expected: Option<SyntaxKind>) {
@@ -771,6 +767,13 @@ mod tests {
             parse_bytes(&[0xff]),
             Err(InputError::InvalidUtf8 { valid_up_to: 0 })
         ));
+    }
+
+    #[test]
+    fn syntax_only_parsing_skips_language_validation() {
+        let document = parse_syntax("{ x = missing; x = 2; }").expect("small UTF-8 fixture");
+        assert!(document.is_valid());
+        assert_eq!(document.root().text(), "{ x = missing; x = 2; }");
     }
 
     #[test]

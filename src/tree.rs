@@ -3,6 +3,7 @@ use core::{fmt, iter::FusedIterator};
 use crate::{Diagnostic, Severity, SyntaxKind, TextRange, TextSize};
 
 const NONE: u32 = u32::MAX;
+const COMPACT_NONE: u32 = 0x00ff_ffff;
 
 /// An element identifier within one parsed [`Document`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,22 +27,142 @@ impl ElementId {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RawElement {
     pub(crate) kind: SyntaxKind,
-    pub(crate) range: TextRange,
-    pub(crate) parent: u32,
-    pub(crate) first_child: u32,
-    pub(crate) next_sibling: u32,
+    range: [u8; 8],
+    parent: [u8; 3],
+    next_sibling: [u8; 3],
 }
 
-const _: () = assert!(size_of::<RawElement>() <= 24);
+const _: () = assert!(size_of::<RawElement>() == 15);
 
 impl RawElement {
-    pub(crate) const fn new(kind: SyntaxKind, range: TextRange, parent: u32) -> Self {
+    pub(crate) fn new(kind: SyntaxKind, range: TextRange, parent: u32) -> Self {
         Self {
             kind,
-            range,
-            parent,
-            first_child: NONE,
-            next_sibling: NONE,
+            range: encode_range(range),
+            parent: encode_link(parent),
+            next_sibling: encode_link(NONE),
+        }
+    }
+
+    fn range(self) -> TextRange {
+        decode_range(self.range)
+    }
+
+    fn set_range(&mut self, range: TextRange) {
+        self.range = encode_range(range);
+    }
+
+    fn parent(self) -> u32 {
+        decode_link(self.parent)
+    }
+
+    fn next_sibling(self) -> u32 {
+        decode_link(self.next_sibling)
+    }
+
+    fn set_next_sibling(&mut self, sibling: u32) {
+        self.next_sibling = encode_link(sibling);
+    }
+}
+
+fn encode_link(link: u32) -> [u8; 3] {
+    let bytes = if link == NONE { COMPACT_NONE } else { link }.to_le_bytes();
+    [bytes[0], bytes[1], bytes[2]]
+}
+
+fn decode_link(bytes: [u8; 3]) -> u32 {
+    let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]);
+    if value == COMPACT_NONE { NONE } else { value }
+}
+
+fn encode_range(range: TextRange) -> [u8; 8] {
+    let start = range.start().get().to_le_bytes();
+    let end = range.end().get().to_le_bytes();
+    [
+        start[0], start[1], start[2], start[3], end[0], end[1], end[2], end[3],
+    ]
+}
+
+fn decode_range(bytes: [u8; 8]) -> TextRange {
+    TextRange::new(
+        TextSize::new(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        TextSize::new(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])),
+    )
+}
+
+const CHUNK_SHIFT: usize = 12;
+const CHUNK_LEN: usize = 1 << CHUNK_SHIFT;
+const CHUNK_MASK: usize = CHUNK_LEN - 1;
+
+pub(crate) struct ElementStore {
+    chunks: Box<[Box<[RawElement]>]>,
+    len: usize,
+}
+
+impl ElementStore {
+    fn get(&self, index: usize) -> Option<&RawElement> {
+        if index >= self.len {
+            return None;
+        }
+        self.chunks
+            .get(index >> CHUNK_SHIFT)?
+            .get(index & CHUNK_MASK)
+    }
+}
+
+struct ElementBuilder {
+    chunks: Vec<Box<[RawElement]>>,
+    current: Vec<RawElement>,
+    len: usize,
+}
+
+impl ElementBuilder {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            current: Vec::with_capacity(CHUNK_LEN),
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn push(&mut self, element: RawElement) {
+        if self.current.len() == CHUNK_LEN {
+            let full = core::mem::replace(&mut self.current, Vec::with_capacity(CHUNK_LEN));
+            self.chunks.push(full.into_boxed_slice());
+        }
+        self.current.push(element);
+        self.len += 1;
+    }
+
+    fn get(&self, index: usize) -> &RawElement {
+        let chunk = index >> CHUNK_SHIFT;
+        if chunk < self.chunks.len() {
+            &self.chunks[chunk][index & CHUNK_MASK]
+        } else {
+            &self.current[index & CHUNK_MASK]
+        }
+    }
+
+    fn get_mut(&mut self, index: usize) -> &mut RawElement {
+        let chunk = index >> CHUNK_SHIFT;
+        if chunk < self.chunks.len() {
+            &mut self.chunks[chunk][index & CHUNK_MASK]
+        } else {
+            &mut self.current[index & CHUNK_MASK]
+        }
+    }
+
+    fn finish(mut self) -> ElementStore {
+        if !self.current.is_empty() {
+            self.chunks.push(self.current.into_boxed_slice());
+        }
+        ElementStore {
+            chunks: self.chunks.into_boxed_slice(),
+            len: self.len,
         }
     }
 }
@@ -49,7 +170,7 @@ impl RawElement {
 /// A parsed Nix source file and its compact lossless syntax tree.
 pub struct Document<'src> {
     pub(crate) source: &'src str,
-    pub(crate) elements: Box<[RawElement]>,
+    pub(crate) elements: ElementStore,
     pub(crate) diagnostics: Box<[Diagnostic]>,
 }
 
@@ -58,7 +179,7 @@ impl fmt::Debug for Document<'_> {
         formatter
             .debug_struct("Document")
             .field("source_len", &self.source.len())
-            .field("elements", &self.elements.len())
+            .field("elements", &self.elements.len)
             .field("diagnostics", &self.diagnostics.len())
             .finish()
     }
@@ -67,12 +188,12 @@ impl fmt::Debug for Document<'_> {
 impl<'src> Document<'src> {
     pub(crate) fn new(
         source: &'src str,
-        elements: Vec<RawElement>,
+        elements: ElementStore,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         Self {
             source,
-            elements: elements.into_boxed_slice(),
+            elements,
             diagnostics: diagnostics.into_boxed_slice(),
         }
     }
@@ -106,7 +227,7 @@ impl<'src> Document<'src> {
     /// Returns the number of nodes and tokens in the document.
     #[must_use]
     pub fn element_count(&self) -> usize {
-        self.elements.len()
+        self.elements.len
     }
 
     /// Returns all syntax and validation diagnostics.
@@ -124,7 +245,9 @@ impl<'src> Document<'src> {
     }
 
     pub(crate) fn raw(&self, id: ElementId) -> &RawElement {
-        &self.elements[id.0 as usize]
+        self.elements
+            .get(id.0 as usize)
+            .expect("element identifier belongs to this document")
     }
 
     pub(crate) fn push_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
@@ -228,7 +351,7 @@ impl<'doc, 'src> Node<'doc, 'src> {
     /// Returns the node's byte range.
     #[must_use]
     pub fn range(self) -> TextRange {
-        self.document.raw(self.id).range
+        self.document.raw(self.id).range()
     }
 
     /// Returns the original text covered by the node.
@@ -241,7 +364,7 @@ impl<'doc, 'src> Node<'doc, 'src> {
     /// Returns the parent node, or `None` for the root.
     #[must_use]
     pub fn parent(self) -> Option<Self> {
-        let parent = self.document.raw(self.id).parent;
+        let parent = self.document.raw(self.id).parent();
         (parent != NONE).then_some(Self {
             document: self.document,
             id: ElementId::new(parent),
@@ -251,9 +374,16 @@ impl<'doc, 'src> Node<'doc, 'src> {
     /// Iterates over immediate child nodes and tokens.
     #[must_use]
     pub fn children(self) -> Children<'doc, 'src> {
+        let candidate = self.id.get().saturating_add(1);
+        let next = self
+            .document
+            .elements
+            .get(candidate as usize)
+            .filter(|element| element.parent() == self.id.get())
+            .map_or(NONE, |_| candidate);
         Children {
             document: self.document,
-            next: self.document.raw(self.id).first_child,
+            next,
         }
     }
 
@@ -315,7 +445,7 @@ impl<'doc, 'src> TokenNode<'doc, 'src> {
     /// Returns the token's byte range.
     #[must_use]
     pub fn range(self) -> TextRange {
-        self.document.raw(self.id).range
+        self.document.raw(self.id).range()
     }
 
     /// Returns the token's original source text.
@@ -330,7 +460,7 @@ impl<'doc, 'src> TokenNode<'doc, 'src> {
     pub fn parent(self) -> Node<'doc, 'src> {
         Node {
             document: self.document,
-            id: ElementId::new(self.document.raw(self.id).parent),
+            id: ElementId::new(self.document.raw(self.id).parent()),
         }
     }
 }
@@ -351,21 +481,152 @@ impl<'doc, 'src> Iterator for Children<'doc, 'src> {
         }
         let id = ElementId::new(self.next);
         let raw = self.document.raw(id);
-        self.next = raw.next_sibling;
+        self.next = raw.next_sibling();
         self.document.element(id)
     }
 }
 
 impl FusedIterator for Children<'_, '_> {}
 
-#[derive(Debug)]
-pub(crate) enum Event {
-    Start {
-        kind: Option<SyntaxKind>,
-        forward_parent: Option<usize>,
-    },
-    Token(crate::Token),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum EventTag {
+    Start,
+    Token,
     Finish,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Event {
+    tag: EventTag,
+    kind: SyntaxKind,
+    data: [u8; 8],
+}
+
+const _: () = assert!(size_of::<Event>() == 10);
+
+impl Event {
+    pub(crate) const fn start() -> Self {
+        Self {
+            tag: EventTag::Start,
+            kind: SyntaxKind::Eof,
+            data: [u8::MAX; 8],
+        }
+    }
+
+    pub(crate) fn token(token: crate::Token) -> Self {
+        Self {
+            tag: EventTag::Token,
+            kind: token.kind(),
+            data: encode_range(token.range()),
+        }
+    }
+
+    pub(crate) const fn finish() -> Self {
+        Self {
+            tag: EventTag::Finish,
+            kind: SyntaxKind::Eof,
+            data: [0; 8],
+        }
+    }
+
+    fn start_kind(self) -> Option<SyntaxKind> {
+        (self.tag == EventTag::Start && self.kind != SyntaxKind::Eof).then_some(self.kind)
+    }
+
+    pub(crate) fn set_start_kind(&mut self, kind: SyntaxKind) {
+        assert!(
+            self.tag == EventTag::Start,
+            "marker did not point to a start event"
+        );
+        self.kind = kind;
+    }
+
+    fn take_start_kind(&mut self) -> Option<SyntaxKind> {
+        let kind = self.start_kind()?;
+        self.kind = SyntaxKind::Eof;
+        Some(kind)
+    }
+
+    fn forward_parent(self) -> Option<usize> {
+        if self.tag != EventTag::Start {
+            return None;
+        }
+        let value = u32::from_le_bytes(self.data[..4].try_into().expect("four-byte slice"));
+        (value != u32::MAX).then_some(value as usize)
+    }
+
+    pub(crate) fn set_forward_parent(&mut self, distance: usize) {
+        assert!(
+            self.tag == EventTag::Start,
+            "marker did not point to a start event"
+        );
+        let distance = u32::try_from(distance).expect("event distance fits compact source offsets");
+        self.data[..4].copy_from_slice(&distance.to_le_bytes());
+    }
+
+    fn token_value(self) -> Option<crate::Token> {
+        (self.tag == EventTag::Token).then(|| crate::Token::new(self.kind, decode_range(self.data)))
+    }
+}
+
+pub(crate) struct EventBuffer {
+    chunks: Vec<Option<Box<[Event]>>>,
+    current: Vec<Event>,
+    len: usize,
+}
+
+impl EventBuffer {
+    pub(crate) fn with_source_capacity(source_len: usize) -> Self {
+        Self {
+            chunks: Vec::with_capacity(source_len / (CHUNK_LEN * 2)),
+            current: Vec::with_capacity(CHUNK_LEN),
+            len: 0,
+        }
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn push(&mut self, event: Event) {
+        if self.current.len() == CHUNK_LEN {
+            let full = core::mem::replace(&mut self.current, Vec::with_capacity(CHUNK_LEN));
+            self.chunks.push(Some(full.into_boxed_slice()));
+        }
+        self.current.push(event);
+        self.len += 1;
+    }
+
+    pub(crate) fn get_mut(&mut self, index: usize) -> &mut Event {
+        let chunk = index >> CHUNK_SHIFT;
+        if chunk < self.chunks.len() {
+            &mut self.chunks[chunk]
+                .as_mut()
+                .expect("event chunk is still live")[index & CHUNK_MASK]
+        } else {
+            &mut self.current[index & CHUNK_MASK]
+        }
+    }
+
+    fn seal(&mut self) {
+        if !self.current.is_empty() {
+            let current = core::mem::take(&mut self.current);
+            self.chunks.push(Some(current.into_boxed_slice()));
+        }
+    }
+
+    fn get(&self, index: usize) -> Event {
+        self.chunks[index >> CHUNK_SHIFT]
+            .as_ref()
+            .expect("event chunk is still live")[index & CHUNK_MASK]
+    }
+
+    fn release_through(&mut self, index: usize) {
+        if index & CHUNK_MASK == CHUNK_MASK {
+            self.chunks[index >> CHUNK_SHIFT] = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -374,60 +635,71 @@ struct Frame {
     last_child: u32,
 }
 
-pub(crate) fn build_tree(events: &mut [Event]) -> Vec<RawElement> {
-    let mut elements = Vec::with_capacity(events.len() / 2);
-    let mut stack: Vec<Frame> = Vec::new();
+pub(crate) fn build_tree(events: &mut EventBuffer) -> Result<ElementStore, crate::InputError> {
+    events.seal();
+    let mut elements = ElementBuilder::new();
+    let mut stack: Vec<Frame> = Vec::with_capacity(32);
+    let mut kinds = Vec::with_capacity(4);
     let mut last_end = TextSize::new(0);
 
     for index in 0..events.len() {
-        match &events[index] {
-            Event::Start { kind: None, .. } => {}
-            Event::Start { kind: Some(_), .. } => {
-                let mut kinds = Vec::new();
+        let event = events.get(index);
+        match event.tag {
+            EventTag::Start if event.start_kind().is_none() => {}
+            EventTag::Start => {
+                kinds.clear();
                 let mut cursor = index;
-                while let Event::Start {
-                    kind,
-                    forward_parent,
-                } = &mut events[cursor]
-                {
-                    if let Some(kind) = kind.take() {
+                loop {
+                    let event = events.get_mut(cursor);
+                    if event.tag != EventTag::Start {
+                        break;
+                    }
+                    if let Some(kind) = event.take_start_kind() {
                         kinds.push(kind);
                     }
-                    let Some(distance) = forward_parent.take() else {
+                    let Some(distance) = event.forward_parent() else {
                         break;
                     };
                     cursor += distance;
                 }
-                for kind in kinds.into_iter().rev() {
-                    start_element(&mut elements, &mut stack, kind, last_end);
+                for kind in kinds.drain(..).rev() {
+                    start_element(&mut elements, &mut stack, kind, last_end)?;
                 }
             }
-            Event::Token(token) => {
+            EventTag::Token => {
+                let token = event.token_value().expect("tag checked");
+                if elements.len() == COMPACT_NONE as usize {
+                    return Err(crate::InputError::TooManyElements);
+                }
                 let id = elements.len() as u32;
                 let parent = stack.last().map_or(NONE, |frame| frame.element);
                 elements.push(RawElement::new(token.kind(), token.range(), parent));
                 link_child(&mut elements, &mut stack, id);
                 last_end = token.range().end();
             }
-            Event::Finish => {
+            EventTag::Finish => {
                 let frame = stack
                     .pop()
                     .expect("parser emitted an unmatched finish event");
-                let element = &mut elements[frame.element as usize];
-                element.range = TextRange::new(element.range.start(), last_end);
+                let element = elements.get_mut(frame.element as usize);
+                element.set_range(TextRange::new(element.range().start(), last_end));
             }
         }
+        events.release_through(index);
     }
     debug_assert!(stack.is_empty());
-    elements
+    Ok(elements.finish())
 }
 
 fn start_element(
-    elements: &mut Vec<RawElement>,
+    elements: &mut ElementBuilder,
     stack: &mut Vec<Frame>,
     kind: SyntaxKind,
     position: TextSize,
-) {
+) -> Result<(), crate::InputError> {
+    if elements.len() == COMPACT_NONE as usize {
+        return Err(crate::InputError::TooManyElements);
+    }
     let id = elements.len() as u32;
     let parent = stack.last().map_or(NONE, |frame| frame.element);
     elements.push(RawElement::new(
@@ -440,19 +712,21 @@ fn start_element(
         element: id,
         last_child: NONE,
     });
+    Ok(())
 }
 
-fn link_child(elements: &mut [RawElement], stack: &mut [Frame], child: u32) {
+fn link_child(elements: &mut ElementBuilder, stack: &mut [Frame], child: u32) {
     let Some(parent) = stack.last_mut() else {
         return;
     };
-    let child_start = elements[child as usize].range.start();
-    let parent_element = &mut elements[parent.element as usize];
-    if parent_element.first_child == NONE {
-        parent_element.first_child = child;
-        parent_element.range = TextRange::new(child_start, parent_element.range.end());
+    let child_start = elements.get(child as usize).range().start();
+    let parent_element = elements.get_mut(parent.element as usize);
+    if parent.last_child == NONE {
+        parent_element.set_range(TextRange::new(child_start, parent_element.range().end()));
     } else {
-        elements[parent.last_child as usize].next_sibling = child;
+        elements
+            .get_mut(parent.last_child as usize)
+            .set_next_sibling(child);
     }
     parent.last_child = child;
 }

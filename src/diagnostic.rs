@@ -8,6 +8,8 @@ use crate::{SyntaxKind, TextRange};
 pub enum InputError {
     /// The source is too large for compact 32-bit offsets.
     TooLarge,
+    /// The syntax tree has too many elements for compact links.
+    TooManyElements,
     /// The input is not valid UTF-8.
     InvalidUtf8 {
         /// The first byte that is not valid UTF-8.
@@ -19,6 +21,9 @@ impl fmt::Display for InputError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => formatter.write_str("Nix source exceeds the 4 GiB input limit"),
+            Self::TooManyElements => {
+                formatter.write_str("Nix syntax tree exceeds the compact element limit")
+            }
             Self::InvalidUtf8 { valid_up_to } => {
                 write!(formatter, "Nix source is not UTF-8 at byte {valid_up_to}")
             }

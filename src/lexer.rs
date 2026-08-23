@@ -8,6 +8,10 @@ pub struct Token {
 }
 
 impl Token {
+    pub(crate) const fn new(kind: SyntaxKind, range: TextRange) -> Self {
+        Self { kind, range }
+    }
+
     pub(crate) const fn eof(position: TextSize) -> Self {
         Self {
             kind: SyntaxKind::Eof,
