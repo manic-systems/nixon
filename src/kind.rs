@@ -22,6 +22,8 @@ pub enum SyntaxKind {
     Float,
     /// Raw text inside a string or interpolated path.
     StringFragment,
+    /// Raw text inside an interpolated path.
+    PathFragment,
     /// A path literal without interpolation.
     Path,
     /// A search-path literal such as `<nixpkgs>`.
