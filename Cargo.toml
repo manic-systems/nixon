@@ -16,7 +16,7 @@ rustdoc-args = ["--generate-link-to-definition"]
 [dependencies]
 
 [workspace]
-members = ["wasm"]
+members = ["ffi", "wasm"]
 exclude = ["benchmarks", "fuzz"]
 resolver = "3"
 

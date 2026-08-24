@@ -15,6 +15,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       root = s;
       fileset = fs.unions [
         (s + /src)
+        (s + /ffi)
         (s + /wasm)
         (s + /tests)
 

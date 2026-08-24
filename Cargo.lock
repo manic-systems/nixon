@@ -19,6 +19,13 @@ name = "nixon"
 version = "0.1.0"
 
 [[package]]
+name = "nixon-ffi"
+version = "0.1.0"
+dependencies = [
+ "nixon",
+]
+
+[[package]]
 name = "nixon-wasm"
 version = "0.1.0"
 dependencies = [
