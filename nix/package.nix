@@ -15,10 +15,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
     fs.toSource {
       root = s;
       fileset = fs.unions [
-        (s + /src)
-        (s + /ffi)
-        (s + /wasm)
-        (s + /tests)
+        (s + /crates/ffi)
+        (s + /crates/nixon)
+        (s + /crates/wasm)
 
         (s + /Cargo.lock)
         (s + /Cargo.toml)
@@ -33,7 +32,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-    install -Dm644 ffi/include/nixon.h $out/include/nixon.h
+    install -Dm644 crates/ffi/include/nixon.h $out/include/nixon.h
     install -Dm644 target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/libnixon_ffi.a \
       $out/lib/libnixon_ffi.a
     install -Dm755 target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/libnixon_ffi${stdenv.hostPlatform.extensions.sharedLibrary} \

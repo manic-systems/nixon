@@ -1,30 +1,32 @@
 [package]
-name = "nixon-competitors"
-version = "0.0.0"
-edition = "2024"
+name         = "nixon-benchmarks"
+version      = "0.0.0"
+edition      = "2024"
 rust-version = "1.97"
-publish = false
-license = "GPL-3.0-only"
+publish      = false
+license      = "GPL-3.0-only"
 
+# fwiw we cannot really build those with Nix. That's sad, but also, not really
+# because we probably won't be benchmarking with Nix anyway.
 [dependencies]
-nixon = { path = ".." }
 nixel = { git = "https://github.com/kamadorueda/nixel", rev = "a4d7ccfd2a5ce28b6ffdc2ed0dd3f6c339b2357f", default-features = false }
-rnix = { git = "https://github.com/nix-community/rnix-parser", rev = "aae4163d88efefcba5e11482f25a5e6dcd21492c" }
+nixon = { path = "../crates/nixon" }
+rnix  = { git = "https://github.com/nix-community/rnix-parser", rev = "aae4163d88efefcba5e11482f25a5e6dcd21492c" }
 
 [dev-dependencies]
-criterion = { version = "0.8", default-features = false }
+criterion = { version = "0.8.2", default-features = false }
 
 [[bench]]
-name = "parse"
 harness = false
+name    = "parse"
 
 [profile.release]
-opt-level = 3
-lto = "fat"
 codegen-units = 1
-strip = true
+lto           = "fat"
+opt-level     = 3
+strip         = true
 
 [profile.bench]
+debug    = true
 inherits = "release"
-debug = true
-strip = false
+strip    = false

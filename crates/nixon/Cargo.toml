@@ -1,0 +1,20 @@
+[package]
+name         = "nixon"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97.0"
+description  = "A small, lossless parser for the Nix language"
+license      = "EUPL-1.2"
+repository   = "https://github.com/manic-systems/nixon"
+readme       = "../../README.md"
+keywords     = [ "nix", "parser", "syntax", "wasm" ]
+categories   = [ "parser-implementations", "development-tools" ]
+include      = [ "examples/**", "src/**", "tests/**" ]
+
+[package.metadata.docs.rs]
+rustdoc-args = [ "--generate-link-to-definition" ]
+
+[dependencies]
+
+[lints]
+workspace = true

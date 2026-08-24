@@ -1,13 +1,17 @@
 # Benchmarks
 
-The benchmark crate compares Nixon against fixed revisions of rnix and NixEL:
+This is the benchmark crate for comparing Nixon against fixes revisions of rnix
+and NixEL. At the time of this benchmarked, the revisions for the compared
+targets are as follows:
 
-- Nixon: the current checkout
+- Nixon: `c272c29eca7dc7f6b91409c70e7352f6d1bbacbe`
 - rnix: `aae4163d88efefcba5e11482f25a5e6dcd21492c`
 - NixEL: `a4d7ccfd2a5ce28b6ffdc2ed0dd3f6c339b2357f`
 
-The benchmark crate is GPL-3.0-only and lives in its own workspace because it
-links NixEL.
+While you will not get _identical_ results from the revisions alone (obviously),
+they should help you asses what exactly was benchmarked. The benchmark crate is
+GPL-3.0-only and lives in its own workspace because it links NixEL. I'm not sure
+if this entails any other license obligations.
 
 ## Throughput
 
@@ -40,11 +44,15 @@ Replace `nixon` with `rnix` or `nixel` to profile the other parsers.
 
 ## Method
 
-Each timed call builds a complete syntax tree. File I/O is excluded. Nixon uses
-`parse_syntax`; `parse` also runs semantic validation that the other parser APIs
-do not provide. NixEL consumes a `String`, so its timed call includes the
-required clone.
+Each timed call builds a complete syntax tree, with file I/O being excluded.
+Nixon uses `parse_syntax`; `parse` also runs semantic validation that the other
+parser APIs do not provide. NixEL consumes a `String`, so its timed call
+includes the required clone.
 
 ## Results
 
-See the recorded [2026-08-23 results](results/2026-08-23.md).
+The latest recording of the benchmarking results are from **26.08.23**. This
+section will be updated as more benchmarks are ran when either upstream updates
+or Nixon receives a meaningful change to the parser logic.
+
+- [2026-08-23 results](results/2026-08-23.md).

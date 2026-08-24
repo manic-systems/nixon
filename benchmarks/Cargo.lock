@@ -283,7 +283,7 @@ name = "nixon"
 version = "0.1.0"
 
 [[package]]
-name = "nixon-competitors"
+name = "nixon-benchmarks"
 version = "0.0.0"
 dependencies = [
  "criterion",

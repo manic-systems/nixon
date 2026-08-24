@@ -1,47 +1,27 @@
-[package]
-name = "nixon"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.97"
-description = "A small, lossless parser for the Nix language"
-license = "EUPL-1.2"
-repository = "https://github.com/manic-systems/nixon"
-keywords = ["nix", "parser", "syntax", "wasm"]
-categories = ["parser-implementations", "development-tools"]
-include = ["src/**", "tests/**", "Cargo.toml", "README.md", "LICENSE"]
-
-[package.metadata.docs.rs]
-rustdoc-args = ["--generate-link-to-definition"]
-
-[dependencies]
-
 [workspace]
-members = ["ffi", "wasm"]
-exclude = ["benchmarks", "fuzz"]
+members  = [ "crates/ffi", "crates/nixon", "crates/wasm" ]
+exclude  = [ "benchmarks", "fuzz" ]
 resolver = "3"
 
 [workspace.lints.rust]
 missing_docs = "warn"
-unsafe_code = "forbid"
+unsafe_code  = "forbid"
 
 [workspace.lints.clippy]
 correctness = "deny"
-suspicious = "warn"
-style = "warn"
-complexity = "warn"
-perf = "warn"
-
-[lints]
-workspace = true
+suspicious  = "warn"
+style       = "warn"
+complexity  = "warn"
+perf        = "warn"
 
 [profile.release]
-opt-level = 3
-lto = "fat"
 codegen-units = 1
-panic = "abort"
-strip = true
+lto           = "fat"
+opt-level     = 3
+panic         = "abort"
+strip         = true
 
 [profile.bench]
+debug    = true
 inherits = "release"
-debug = true
-strip = false
+strip    = false

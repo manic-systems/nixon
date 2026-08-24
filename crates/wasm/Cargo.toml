@@ -1,0 +1,19 @@
+[package]
+name         = "nixon-wasm"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97"
+description  = "Browser bindings for the Nixon Nix parser"
+license      = "EUPL-1.2"
+repository   = "https://github.com/manic-systems/nixon"
+publish      = false
+
+[lib]
+crate-type = [ "cdylib", "rlib" ]
+
+[dependencies]
+nixon        = { path = "../nixon" }
+wasm-bindgen = "=0.2.121"
+
+[lints]
+workspace = true

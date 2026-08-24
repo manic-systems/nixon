@@ -12,7 +12,6 @@
   hyperfine,
   valgrind,
   wasm-bindgen-cli,
-  alejandra,
 }:
 mkShell {
   name = "nixon";
@@ -23,15 +22,13 @@ mkShell {
     cargo
 
     # Tools
-    rustfmt
+    (rustfmt.override {asNightly = true;})
     clippy
-    cargo
     taplo
     binaryen
     hyperfine
     valgrind
     wasm-bindgen-cli
-    alejandra
 
     # NixEL's generated C++ binding.
     llvmPackages.libclang
