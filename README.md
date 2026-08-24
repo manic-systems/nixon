@@ -12,7 +12,8 @@ For now, the API is at 0.1 and may change when it annoys me. The parser itself
 is solid enough that it can be considered more than just a prototype, but it
 should _not_ be considered stable either. It is tested against the Nix language
 fixtures, the shared rnix fixtures, fuzzed tree invariants, and the native and
-WebAssembly APIs. Oh yeah, we can do WebAssembly.
+WebAssembly APIs. It can also do C FFI (to an extent) for the sake of using with
+C and Nim. Oh yes.
 
 ## Motivation
 
@@ -94,7 +95,7 @@ duration of `nixon_parse`. Consider the example below:
 $ cargo build -p nixon-ffi --release
 
 # Compile the example parser
-$ cc ffi/examples/parse.c -Iffi/include -Ltarget/release \
+$ cc crates/ffi/examples/parse.c -Icrates/ffi/include -Ltarget/release \
     -Wl,-rpath,"$PWD/target/release" -lnixon_ffi -o nixon-example
 
 # Now you can use it
@@ -102,8 +103,8 @@ $ ./nixon-example
 ```
 
 > [!TIP]
-> Take a look at [`ffi/include/nixon.h`](ffi/include/nixon.h) for complete
-> declarations and numeric kind constants.
+> Take a look at [`crates/ffi/include/nixon.h`](crates/ffi/include/nixon.h) for
+> complete declarations and numeric kind constants.
 
 A successful parse returns an opaque `NixonDocument`; release it with
 `nixon_document_free`. Invalid Nix is a successful parse with diagnostics.
@@ -166,8 +167,9 @@ tests in the future for testing the web? Not sure yet.
 The external parser fixtures are not vendored. I didn't want to think about
 licensing, so I'm letting you all the fun. Set `NIXON_NIX_LANGUAGE_TESTS` and
 `NIXON_RNIX_TESTS` to their respective checkout paths before running the
-upstream tests. [`tests/upstream.rs`](tests/upstream.rs) documents the expected
-layout for you.
+upstream tests.
+[`crates/nixon/tests/upstream.rs`](crates/nixon/tests/upstream.rs) documents the
+expected layout for you.
 
 ## License
 
