@@ -82,6 +82,34 @@ The generated module exports `parse`, `parseWithOptions`, and `ParsedNix`. The
 optimized browser binary from the recorded run is 114,567 bytes, or 53,192 bytes
 after gzip. Which is pretty modest, but a good start.
 
+### C and FFI
+
+The `nixon-ffi` crate builds both shared and static libraries. Its C API has an
+integer-indexed tree, so C and Nim callers will never have to deal with Rust
+layouts or lifetimes (you're welcome!) The parser only borrows the input for the
+duration of `nixon_parse`. Consider the example below:
+
+```sh
+# Build the ffi crate first
+$ cargo build -p nixon-ffi --release
+
+# Compile the example parser
+$ cc ffi/examples/parse.c -Iffi/include -Ltarget/release \
+    -Wl,-rpath,"$PWD/target/release" -lnixon_ffi -o nixon-example
+
+# Now you can use it
+$ ./nixon-example
+```
+
+> [!TIP]
+> Take a look at [`ffi/include/nixon.h`](ffi/include/nixon.h) for complete
+> declarations and numeric kind constants.
+
+A successful parse returns an opaque `NixonDocument`; release it with
+`nixon_document_free`. Invalid Nix is a successful parse with diagnostics.
+Nonzero status codes are reserved for bad FFI arguments or inputs Nixon cannot
+represent.
+
 ### Limits
 
 Nixon's speed and size are not without some... drawbacks.
