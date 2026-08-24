@@ -49,10 +49,17 @@ Nixon uses `parse_syntax`; `parse` also runs semantic validation that the other
 parser APIs do not provide. NixEL consumes a `String`, so its timed call
 includes the required clone.
 
+The `nix-instantiate` adapter is the reference C++ parser spawned as a
+subprocess (`nix-instantiate --parse -`) with input piped through stdin, so its
+timing includes process startup, and `--parse` also checks for unbound
+variables. Its benchmark is skipped when `nix-instantiate` is not on `PATH`.
+
 ## Results
 
-The latest recording of the benchmarking results are from **26.08.23**. This
-section will be updated as more benchmarks are ran when either upstream updates
-or Nixon receives a meaningful change to the parser logic.
+The latest recording of the benchmarking results are from **26.08.24**. This
+section will be updated as more benchmarks are ran when either upstream updates,
+a new "competitor" is added, or when Nixon receives a meaningful change to the
+parser logic.
 
-- [2026-08-23 results](results/2026-08-23.md).
+- [2026-08-24 results](results/2026-08-24.md)
+- [2026-08-23 results](results/2026-08-23.md)
