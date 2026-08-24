@@ -1,6 +1,7 @@
 {
   lib,
   rustPlatform,
+  stdenv,
 }:
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "nixon";
@@ -26,7 +27,19 @@ rustPlatform.buildRustPackage (finalAttrs: {
     };
 
   cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
+  cargoBuildFlags = ["-p" "nixon-ffi"];
+  cargoTestFlags = ["-p" "nixon-ffi"];
   enableParallelBuilding = true;
+
+  installPhase = ''
+    runHook preInstall
+    install -Dm644 ffi/include/nixon.h $out/include/nixon.h
+    install -Dm644 target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/libnixon_ffi.a \
+      $out/lib/libnixon_ffi.a
+    install -Dm755 target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/libnixon_ffi${stdenv.hostPlatform.extensions.sharedLibrary} \
+      $out/lib/libnixon_ffi${stdenv.hostPlatform.extensions.sharedLibrary}
+    runHook postInstall
+  '';
 
   meta = {
     description = "Compact lossless parser for the Nix language";
