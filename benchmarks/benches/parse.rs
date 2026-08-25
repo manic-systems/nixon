@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use nixon_competitors::cases;
+use nixon_benchmarks::cases;
 
 fn benchmarks(criterion: &mut Criterion) {
     for case in cases() {

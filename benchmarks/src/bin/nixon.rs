@@ -1,6 +1,6 @@
 use std::{env, hint::black_box, process::ExitCode};
 
-use nixon_competitors::load;
+use nixon_benchmarks::load;
 
 fn main() -> ExitCode {
     let Some(path) = env::args_os().nth(1) else {
