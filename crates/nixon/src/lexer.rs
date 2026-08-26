@@ -708,6 +708,18 @@ mod tests {
   }
 
   #[test]
+  fn tokenizes_attribute_access_as_identifiers_and_dots() {
+    assert_eq!(kinds("a.b.c"), [
+      SyntaxKind::Identifier,
+      SyntaxKind::Dot,
+      SyntaxKind::Identifier,
+      SyntaxKind::Dot,
+      SyntaxKind::Identifier,
+      SyntaxKind::Eof,
+    ]);
+  }
+
+  #[test]
   fn tokenizes_interpolated_paths() {
     let source = "./foo/${bar}/baz";
     assert_eq!(kinds(source), [
