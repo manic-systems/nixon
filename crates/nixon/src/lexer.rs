@@ -152,14 +152,55 @@ impl<'src> Tokenizer<'src> {
       return self.make_token(SyntaxKind::Error, start);
     }
 
-    if let Some(end) = scan_uri(self.bytes(), start) {
-      self.position = end;
-      return self.make_token(SyntaxKind::Uri, start);
-    }
-
-    if let Some(end) = scan_search_path(self.bytes(), start) {
+    if byte == b'<'
+      && let Some(end) = scan_search_path(self.bytes(), start)
+    {
       self.position = end;
       return self.make_token(SyntaxKind::SearchPath, start);
+    }
+
+    if is_identifier_start(byte) {
+      let mut end = start + 1;
+      let mut may_be_path = true;
+      let mut may_be_uri = byte.is_ascii_alphabetic();
+      while let Some(&byte) = self.bytes().get(end)
+        && is_identifier_continue(byte)
+      {
+        match byte {
+          b'_' => may_be_uri = false,
+          b'\'' => {
+            may_be_path = false;
+            may_be_uri = false;
+          },
+          _ => {},
+        }
+        end += 1;
+      }
+      let next = self.bytes().get(end).copied();
+
+      if may_be_uri
+        && matches!(next, Some(b':' | b'.' | b'+'))
+        && let Some(end) = scan_uri(self.bytes(), start)
+      {
+        self.position = end;
+        return self.make_token(SyntaxKind::Uri, start);
+      }
+
+      if may_be_path
+        && matches!(next, Some(b'/' | b'.' | b'+'))
+        && let Some((end, interpolated)) = scan_path(self.bytes(), start)
+      {
+        self.position = end;
+        if interpolated {
+          self.modes.push(Mode::Path);
+          return self.make_token(SyntaxKind::PathFragment, start);
+        }
+        return self.make_token(SyntaxKind::Path, start);
+      }
+
+      self.position = end;
+      let kind = keyword(&self.bytes()[start..self.position]);
+      return self.make_token(kind, start);
     }
 
     if let Some((end, interpolated)) = scan_path(self.bytes(), start) {
@@ -176,19 +217,6 @@ impl<'src> Tokenizer<'src> {
         && self.bytes().get(start + 1).is_some_and(u8::is_ascii_digit))
     {
       let kind = self.lex_number();
-      return self.make_token(kind, start);
-    }
-
-    if is_identifier_start(byte) {
-      self.position += 1;
-      while self
-        .bytes()
-        .get(self.position)
-        .is_some_and(|byte| is_identifier_continue(*byte))
-      {
-        self.position += 1;
-      }
-      let kind = keyword(&self.bytes()[start..self.position]);
       return self.make_token(kind, start);
     }
 
@@ -677,6 +705,18 @@ mod tests {
         SyntaxKind::Eof,
       ]
     );
+  }
+
+  #[test]
+  fn tokenizes_attribute_access_as_identifiers_and_dots() {
+    assert_eq!(kinds("a.b.c"), [
+      SyntaxKind::Identifier,
+      SyntaxKind::Dot,
+      SyntaxKind::Identifier,
+      SyntaxKind::Dot,
+      SyntaxKind::Identifier,
+      SyntaxKind::Eof,
+    ]);
   }
 
   #[test]
