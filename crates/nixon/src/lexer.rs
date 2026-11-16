@@ -349,7 +349,18 @@ impl<'src> Tokenizer<'src> {
       if self.starts_with(b"${") || self.starts_with(b"\"") {
         break;
       }
-      if self.starts_with(b"\\") {
+      // Like Nix's lexer, `$` pairs with any following character other than
+      // `{`, `"`, and `\`, so the second `$` in `$${` cannot start an
+      // interpolation.
+      if self.starts_with(b"$")
+        && !matches!(
+          self.bytes().get(self.position + 1),
+          None | Some(b'{' | b'"' | b'\\')
+        )
+      {
+        self.position += 1;
+        self.bump_char();
+      } else if self.starts_with(b"\\") {
         self.position += 1;
         if self.position < self.source.len() {
           self.bump_char();
@@ -395,6 +406,16 @@ impl<'src> Tokenizer<'src> {
           continue;
         }
         break;
+      }
+      // `$` pairs with any following character other than `{` and `'`, as
+      // in Nix's indented-string rule, so `$${` is literal text.
+      if self.starts_with(b"$")
+        && !matches!(
+          self.bytes().get(self.position + 1),
+          None | Some(b'{' | b'\'')
+        )
+      {
+        self.position += 1;
       }
       self.bump_char();
     }

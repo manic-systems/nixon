@@ -340,8 +340,12 @@ impl<'doc, 'src> Binding<'doc, 'src> {
 
 impl<'doc, 'src> Inherit<'doc, 'src> {
   /// Returns the optional source expression in `inherit (source)`.
+  ///
+  /// Quoted names such as `"a"` in `inherit "a" b;` are attributes, not a
+  /// source; see [`Self::attributes`].
   #[must_use]
   pub fn source(self) -> Option<Expression<'doc, 'src>> {
+    self.0.token(SyntaxKind::LeftParen)?;
     expression_children(self.0).next()
   }
 
@@ -439,17 +443,152 @@ impl<'doc, 'src> AttributeComponent<'doc, 'src> {
 
   /// Returns the attribute name if it is known without evaluation.
   ///
-  /// Identifiers yield their text and double-quoted strings without
-  /// interpolation yield their value with escapes resolved. Interpolations,
-  /// interpolated strings, and indented strings, which Nix does not accept as
-  /// attribute names, yield `None`.
+  /// This follows Nix's parser, which treats a name as static exactly when it
+  /// is an identifier, a double-quoted string without interpolation, or an
+  /// interpolation whose expression is a plain string literal such as
+  /// `${"a"}` or `${("a")}`. Static names yield their value with escapes
+  /// resolved. Other interpolations, interpolated strings, and indented
+  /// strings, which Nix does not accept as attribute names, yield `None`.
   #[must_use]
   pub fn static_name(self) -> Option<Cow<'src, str>> {
     match self {
       Self::Identifier(token) => Some(Cow::Borrowed(token.text())),
       Self::String(string) => static_string_value(string),
-      Self::Interpolation(_) => None,
+      Self::Interpolation(interpolation) => {
+        literal_string_value(interpolation.expression()?)
+      },
     }
+  }
+}
+
+/// Returns the value of an expression Nix parses to a plain string node.
+///
+/// Those are double-quoted strings without interpolation, indented strings
+/// that consist of a single literal part, and URI literals, possibly in
+/// parentheses. Nix uses this to accept `${"name"}` as a static attribute.
+fn literal_string_value<'src>(
+  mut expression: Expression<'_, 'src>,
+) -> Option<Cow<'src, str>> {
+  loop {
+    match expression {
+      Expression::Parenthesized(parenthesized) => {
+        expression = parenthesized.expression()?;
+      },
+      Expression::String(string) => {
+        return static_string_value(string)
+          .or_else(|| static_indented_string_value(string));
+      },
+      Expression::Literal(literal) => {
+        return literal
+          .token()
+          .filter(|token| token.kind() == SyntaxKind::Uri)
+          .map(|token| Cow::Borrowed(token.text()));
+      },
+      _ => return None,
+    }
+  }
+}
+
+/// Returns the value of an indented string Nix parses to a plain string.
+///
+/// Nix's lexer splits indented-string text at escapes (`''$`, `'''`, `''\`)
+/// and at a `$` or `'` that does not pair with the following character, and
+/// its parser only produces a plain string when one non-empty part remains.
+/// Text that would be split is treated as non-literal here, which can only
+/// misjudge parts that become empty after indentation stripping.
+fn static_indented_string_value<'src>(
+  string: StringExpression<'_, 'src>,
+) -> Option<Cow<'src, str>> {
+  let mut children = string
+    .syntax()
+    .children()
+    .filter(|element| !element.kind().is_trivia());
+  if children.next()?.kind() != SyntaxKind::IndentedQuote {
+    return None;
+  }
+  let text = match children.next()? {
+    Element::Token(token) if token.kind() == SyntaxKind::StringFragment => {
+      if children.next()?.kind() != SyntaxKind::IndentedQuote {
+        return None;
+      }
+      token.text()
+    },
+    Element::Token(token) if token.kind() == SyntaxKind::IndentedQuote => "",
+    Element::Node(_) | Element::Token(_) => return None,
+  };
+  // Nix's opening token also takes spaces up to the first newline.
+  let content = text
+    .trim_start_matches(' ')
+    .strip_prefix('\n')
+    .unwrap_or(text);
+  let bytes = content.as_bytes();
+  let splits = bytes
+    .windows(2)
+    .any(|pair| matches!(pair, [b'\'', b'\'' | b'$'] | [b'$', b'\'']))
+    || bytes.last() == Some(&b'$');
+  if splits {
+    return None;
+  }
+  Some(strip_indentation(content))
+}
+
+/// Strips indentation from a single literal indented-string part like Nix.
+fn strip_indentation(text: &str) -> Cow<'_, str> {
+  let mut at_line_start = true;
+  let mut indent = 0;
+  let mut minimum = usize::MAX;
+  for byte in text.bytes() {
+    if at_line_start {
+      match byte {
+        b' ' => indent += 1,
+        b'\n' => indent = 0,
+        _ => {
+          at_line_start = false;
+          minimum = minimum.min(indent);
+        },
+      }
+    } else if byte == b'\n' {
+      at_line_start = true;
+      indent = 0;
+    }
+  }
+  let mut result = String::with_capacity(text.len());
+  let mut at_line_start = true;
+  let mut dropped = 0;
+  for character in text.chars() {
+    if at_line_start {
+      match character {
+        ' ' => {
+          if dropped >= minimum {
+            result.push(' ');
+          }
+          dropped += 1;
+        },
+        '\n' => {
+          dropped = 0;
+          result.push('\n');
+        },
+        _ => {
+          at_line_start = false;
+          dropped = 0;
+          result.push(character);
+        },
+      }
+    } else {
+      result.push(character);
+      at_line_start = character == '\n';
+    }
+  }
+  // Nix drops a final line that consists only of spaces.
+  if let Some(newline) = result.rfind('\n')
+    && result[newline + 1..].bytes().all(|byte| byte == b' ')
+  {
+    result.truncate(newline + 1);
+  }
+  if result == text {
+    Cow::Borrowed(text)
+  } else {
+    Cow::Owned(result)
   }
 }
 
@@ -484,12 +623,18 @@ fn static_string_value<'src>(
 }
 
 fn unescape_string(text: &str) -> Cow<'_, str> {
-  if !text.contains('\\') {
+  if !text.contains(['\\', '\r']) {
     return Cow::Borrowed(text);
   }
   let mut result = String::with_capacity(text.len());
-  let mut chars = text.chars();
+  let mut chars = text.chars().peekable();
   while let Some(character) = chars.next() {
+    if character == '\r' {
+      // Nix normalises unescaped CR and CR/LF to LF.
+      chars.next_if_eq(&'\n');
+      result.push('\n');
+      continue;
+    }
     if character != '\\' {
       result.push(character);
       continue;

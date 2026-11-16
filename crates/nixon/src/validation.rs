@@ -9,9 +9,11 @@ use crate::{
   Document,
   Element,
   ElementId,
+  Node,
   ParseOptions,
   Severity,
   SyntaxKind,
+  TextRange,
   UrlLiteralPolicy,
   ast::{
     AstNode,
@@ -107,11 +109,7 @@ fn validate_nodes(document: &Document<'_>, diagnostics: &mut Vec<Diagnostic>) {
       SyntaxKind::Lambda => {
         validate_lambda(Lambda::cast(node).expect("kind checked"), diagnostics);
       },
-      SyntaxKind::AttributeSet
-        if node
-          .parent()
-          .is_none_or(|parent| parent.kind() != SyntaxKind::Binding) =>
-      {
+      SyntaxKind::AttributeSet if !is_binding_value(node) => {
         validate_entries(
           AttributeSet::cast(node).expect("kind checked").entries(),
           false,
@@ -135,6 +133,22 @@ fn validate_nodes(document: &Document<'_>, diagnostics: &mut Vec<Diagnostic>) {
       _ => {},
     }
   }
+}
+
+/// Returns whether `node` is the value of a binding, possibly parenthesized.
+///
+/// Nix merges such sets into the enclosing set, so their entries are checked
+/// together with the enclosing bindings.
+fn is_binding_value(node: Node<'_, '_>) -> bool {
+  let mut current = node;
+  while let Some(parent) = current.parent() {
+    match parent.kind() {
+      SyntaxKind::Binding => return true,
+      SyntaxKind::Parenthesized => current = parent,
+      _ => return false,
+    }
+  }
+  false
 }
 
 fn validate_formals(
@@ -183,27 +197,31 @@ fn validate_entries<'doc, 'src: 'doc>(
   is_let: bool,
   diagnostics: &mut Vec<Diagnostic>,
 ) {
-  let mut leaves = Vec::new();
-  collect_leaf_paths(entries, &[], is_let, diagnostics, &mut leaves);
   let mut paths = PathTrie::default();
-  for (path, range) in leaves {
-    if let Some(kind) = paths.insert(path) {
-      diagnostics.push(Diagnostic::validation(
-        kind,
-        Severity::Error,
-        range,
-        SyntaxKind::AttributePath,
-      ));
-    }
-  }
+  define_entries(entries, &[], is_let, &mut paths, diagnostics);
 }
 
-fn collect_leaf_paths<'doc, 'src: 'doc>(
+/// What a definition binds at its static attribute path.
+#[derive(Clone, Copy)]
+enum Shape {
+  /// A value Nix cannot merge with other definitions.
+  Value,
+  /// An attribute set Nix merges with other attribute-set definitions.
+  Set,
+}
+
+/// Records the static definitions of a set of entries in source order.
+///
+/// This mirrors Nix's `addAttr`: every static path component before the last
+/// one defines a nested attribute set, a binding whose value is an attribute
+/// set literal is merged into its path, and the rest of a path after a dynamic
+/// component lands in a fresh set that Nix does not check for duplicates.
+fn define_entries<'doc, 'src: 'doc>(
   entries: impl Iterator<Item = AttributeEntry<'doc, 'src>>,
   prefix: &[Cow<'src, str>],
   is_let: bool,
+  paths: &mut PathTrie<'src>,
   diagnostics: &mut Vec<Diagnostic>,
-  leaves: &mut Vec<(Vec<Cow<'src, str>>, crate::TextRange)>,
 ) {
   for entry in entries {
     match entry {
@@ -211,123 +229,146 @@ fn collect_leaf_paths<'doc, 'src: 'doc>(
         let Some(path) = binding.path() else {
           continue;
         };
-        let Some(components) = static_path(path) else {
-          if is_let {
+        let range = path.syntax().range();
+        let mut full_path = prefix.to_vec();
+        let mut dynamic = false;
+        for (index, component) in path.components().enumerate() {
+          if let Some(name) = component.static_name() {
+            full_path.push(name);
+            continue;
+          }
+          // Nix rejects only a dynamic first component in `let`; later ones
+          // land in a nested set, which may be dynamic.
+          if is_let && index == 0 {
             diagnostics.push(Diagnostic::validation(
               DiagnosticKind::DynamicAttributeInLet,
               Severity::Error,
-              path.syntax().range(),
+              range,
               SyntaxKind::AttributePath,
             ));
           }
+          dynamic = true;
+          break;
+        }
+        if full_path.len() == prefix.len() {
+          continue;
+        }
+        let set = if dynamic {
+          None
+        } else if let Some(Expression::AttributeSet(set)) =
+          binding.value().map(unparenthesize)
+        {
+          Some(set)
+        } else {
+          define(paths, full_path, range, Shape::Value, diagnostics);
           continue;
         };
-        let mut full_path = Vec::with_capacity(prefix.len() + components.len());
-        full_path.extend_from_slice(prefix);
-        full_path.extend(components);
-        if let Some(Expression::AttributeSet(set)) = binding.value() {
-          collect_leaf_paths(
-            set.entries(),
-            &full_path,
-            false,
-            diagnostics,
-            leaves,
-          );
-        } else {
-          leaves.push((full_path, path.syntax().range()));
+        let defined =
+          define(paths, full_path.clone(), range, Shape::Set, diagnostics);
+        if defined && let Some(set) = set {
+          define_entries(set.entries(), &full_path, false, paths, diagnostics);
         }
       },
       AttributeEntry::Inherit(inherit) => {
-        for name in inherit.identifiers() {
-          let mut full_path = Vec::with_capacity(prefix.len() + 1);
-          full_path.extend_from_slice(prefix);
-          full_path.push(Cow::Borrowed(name.text()));
-          leaves.push((full_path, name.range()));
-        }
-        if inherit
-          .syntax()
-          .child_nodes()
-          .any(|node| node.kind() == SyntaxKind::Interpolation)
-        {
-          diagnostics.push(Diagnostic::validation(
-            DiagnosticKind::DynamicAttributeInInherit,
-            Severity::Error,
-            inherit.syntax().range(),
-            SyntaxKind::Interpolation,
-          ));
+        for component in inherit.attributes() {
+          let Some(name) = component.static_name() else {
+            diagnostics.push(Diagnostic::validation(
+              DiagnosticKind::DynamicAttributeInInherit,
+              Severity::Error,
+              component.range(),
+              component_kind(component),
+            ));
+            continue;
+          };
+          let mut full_path = prefix.to_vec();
+          full_path.push(name);
+          define(
+            paths,
+            full_path,
+            component.range(),
+            Shape::Value,
+            diagnostics,
+          );
         }
       },
     }
   }
 }
 
-fn static_path<'doc, 'src: 'doc>(
-  path: AttributePath<'doc, 'src>,
-) -> Option<Vec<Cow<'src, str>>> {
-  path
-    .components()
-    .map(|component| {
-      match component {
-        AttributeComponent::Identifier(token) => {
-          Some(Cow::Borrowed(token.text()))
-        },
-        AttributeComponent::String(string) => {
-          static_string(string.syntax().text())
-        },
-        AttributeComponent::Interpolation(_) => None,
-      }
-    })
-    .collect()
+/// Records one definition and reports whether it was accepted.
+fn define<'src>(
+  paths: &mut PathTrie<'src>,
+  path: Vec<Cow<'src, str>>,
+  range: TextRange,
+  shape: Shape,
+  diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+  let Some(kind) = paths.insert(path, shape) else {
+    return true;
+  };
+  diagnostics.push(Diagnostic::validation(
+    kind,
+    Severity::Error,
+    range,
+    SyntaxKind::AttributePath,
+  ));
+  false
 }
 
-fn static_string(text: &str) -> Option<Cow<'_, str>> {
-  let body = text.strip_prefix('"')?.strip_suffix('"')?;
-  if body.contains("${") {
-    return None;
+fn unparenthesize<'doc, 'src>(
+  mut expression: Expression<'doc, 'src>,
+) -> Expression<'doc, 'src> {
+  while let Expression::Parenthesized(parenthesized) = expression
+    && let Some(inner) = parenthesized.expression()
+  {
+    expression = inner;
   }
-  if !body.contains('\\') {
-    return Some(Cow::Borrowed(body));
+  expression
+}
+
+fn component_kind(component: AttributeComponent<'_, '_>) -> SyntaxKind {
+  match component {
+    AttributeComponent::Identifier(token) => token.kind(),
+    AttributeComponent::String(string) => string.syntax().kind(),
+    AttributeComponent::Interpolation(interpolation) => {
+      interpolation.syntax().kind()
+    },
   }
-  let mut result = String::with_capacity(body.len());
-  let mut chars = body.chars();
-  while let Some(character) = chars.next() {
-    if character == '\\' {
-      let escaped = chars.next()?;
-      result.push(match escaped {
-        'n' => '\n',
-        'r' => '\r',
-        't' => '\t',
-        other => other,
-      });
-    } else {
-      result.push(character);
-    }
-  }
-  Some(Cow::Owned(result))
 }
 
 #[derive(Default)]
 struct PathTrie<'src> {
-  terminal: bool,
+  value:    bool,
+  set:      bool,
   children: HashMap<Cow<'src, str>, Self>,
 }
 
 impl<'src> PathTrie<'src> {
-  fn insert(&mut self, path: Vec<Cow<'src, str>>) -> Option<DiagnosticKind> {
+  fn insert(
+    &mut self,
+    path: Vec<Cow<'src, str>>,
+    shape: Shape,
+  ) -> Option<DiagnosticKind> {
     let mut current = self;
     for component in path {
-      if current.terminal {
+      if current.value {
         return Some(DiagnosticKind::ConflictingAttribute);
       }
+      current.set = true;
       current = current.children.entry(component).or_default();
     }
-    if current.terminal {
-      Some(DiagnosticKind::DuplicateAttribute)
-    } else if current.children.is_empty() {
-      current.terminal = true;
-      None
-    } else {
-      Some(DiagnosticKind::ConflictingAttribute)
+    match shape {
+      Shape::Value if current.value => Some(DiagnosticKind::DuplicateAttribute),
+      Shape::Value if current.set => Some(DiagnosticKind::ConflictingAttribute),
+      Shape::Set if current.value => Some(DiagnosticKind::ConflictingAttribute),
+      Shape::Value => {
+        current.value = true;
+        None
+      },
+      Shape::Set => {
+        current.set = true;
+        None
+      },
     }
   }
 }
@@ -393,8 +434,67 @@ fn validate_expression<'doc, 'src: 'doc>(
     return;
   }
   scope.depth += 1;
-  validate_expression_inner(expression, scope, diagnostics);
+  let frames = scope.frames.len();
+  let dynamic = scope.dynamic;
+  // Walk tail-position chains (`assert`, `with`, `let ... in`, lambda bodies,
+  // `else` branches) in a loop, as the parser does, so they share one level.
+  let mut next = Some(expression);
+  while let Some(expression) = next {
+    next = validate_tail_head(expression, scope, diagnostics);
+  }
+  scope.frames.truncate(frames);
+  scope.dynamic = dynamic;
   scope.depth -= 1;
+}
+
+/// Validates an expression except for its tail expression, which it returns.
+///
+/// Scopes the tail is evaluated in are left on `scope` for the caller to
+/// remove. Expressions without a tail are validated completely.
+fn validate_tail_head<'doc, 'src: 'doc>(
+  expression: Expression<'doc, 'src>,
+  scope: &mut Scope<'src, '_>,
+  diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Expression<'doc, 'src>> {
+  match expression {
+    Expression::Assert(assertion) => {
+      if let Some(condition) = assertion.condition() {
+        validate_expression(condition, scope, diagnostics);
+      }
+      assertion.body()
+    },
+    Expression::With(with) => {
+      if let Some(scope_expression) = with.scope() {
+        validate_expression(scope_expression, scope, diagnostics);
+      }
+      scope.dynamic += 1;
+      with.body()
+    },
+    Expression::LetIn(let_in) => {
+      scope.frames.push(collect_entry_names(let_in.entries()));
+      for entry in let_in.entries() {
+        validate_entry(entry, scope, diagnostics);
+      }
+      let_in.body()
+    },
+    Expression::Lambda(lambda) => {
+      enter_function(lambda, scope, diagnostics);
+      lambda.body()
+    },
+    Expression::IfThenElse(conditional) => {
+      for expression in [conditional.condition(), conditional.then_branch()]
+        .into_iter()
+        .flatten()
+      {
+        validate_expression(expression, scope, diagnostics);
+      }
+      conditional.else_branch()
+    },
+    _ => {
+      validate_expression_inner(expression, scope, diagnostics);
+      None
+    },
+  }
 }
 
 fn validate_expression_inner<'doc, 'src: 'doc>(
@@ -448,41 +548,9 @@ fn validate_expression_inner<'doc, 'src: 'doc>(
     Expression::AttributeSet(set) => {
       validate_attribute_set(set, scope, diagnostics)
     },
-    Expression::LetIn(let_in) => validate_let(let_in, scope, diagnostics),
     Expression::LegacyLet(legacy) => {
       validate_legacy_let(legacy, scope, diagnostics)
     },
-    Expression::IfThenElse(conditional) => {
-      for expression in [
-        conditional.condition(),
-        conditional.then_branch(),
-        conditional.else_branch(),
-      ]
-      .into_iter()
-      .flatten()
-      {
-        validate_expression(expression, scope, diagnostics);
-      }
-    },
-    Expression::Assert(assertion) => {
-      validate_pair(
-        assertion.condition(),
-        assertion.body(),
-        scope,
-        diagnostics,
-      );
-    },
-    Expression::With(with) => {
-      if let Some(scope_expression) = with.scope() {
-        validate_expression(scope_expression, scope, diagnostics);
-      }
-      scope.dynamic += 1;
-      if let Some(body) = with.body() {
-        validate_expression(body, scope, diagnostics);
-      }
-      scope.dynamic -= 1;
-    },
-    Expression::Lambda(lambda) => validate_function(lambda, scope, diagnostics),
     Expression::Apply(apply) => {
       validate_pair(apply.function(), apply.argument(), scope, diagnostics);
     },
@@ -498,7 +566,13 @@ fn validate_expression_inner<'doc, 'src: 'doc>(
     Expression::Binary(operation) => {
       validate_binary(operation, scope, diagnostics);
     },
-    Expression::Error(_) => {},
+    // Constructs with a tail expression are handled by `validate_tail_head`.
+    Expression::Error(_)
+    | Expression::LetIn(_)
+    | Expression::IfThenElse(_)
+    | Expression::Assert(_)
+    | Expression::With(_)
+    | Expression::Lambda(_) => {},
   }
 }
 
@@ -576,7 +650,8 @@ fn validate_attribute_path<'doc, 'src: 'doc>(
   }
 }
 
-fn validate_function<'doc, 'src: 'doc>(
+/// Pushes a function's argument scope and validates its formal defaults.
+fn enter_function<'doc, 'src: 'doc>(
   lambda: Lambda<'doc, 'src>,
   scope: &mut Scope<'src, '_>,
   diagnostics: &mut Vec<Diagnostic>,
@@ -599,26 +674,6 @@ fn validate_function<'doc, 'src: 'doc>(
       validate_expression(default, scope, diagnostics);
     }
   }
-  if let Some(body) = lambda.body() {
-    validate_expression(body, scope, diagnostics);
-  }
-  scope.frames.pop();
-}
-
-fn validate_let<'doc, 'src: 'doc>(
-  let_in: LetIn<'doc, 'src>,
-  scope: &mut Scope<'src, '_>,
-  diagnostics: &mut Vec<Diagnostic>,
-) {
-  let frame = collect_entry_names(let_in.entries());
-  scope.frames.push(frame);
-  for entry in let_in.entries() {
-    validate_entry(entry, scope, diagnostics);
-  }
-  if let Some(body) = let_in.body() {
-    validate_expression(body, scope, diagnostics);
-  }
-  scope.frames.pop();
 }
 
 fn validate_legacy_let<'doc, 'src: 'doc>(
@@ -665,19 +720,20 @@ fn validate_entry<'doc, 'src: 'doc>(
       }
     },
     AttributeEntry::Inherit(inherit) => {
-      let source = inherit.source();
-      if let Some(source) = source {
+      if let Some(source) = inherit.source() {
         validate_expression(source, scope, diagnostics);
-      } else {
-        for name in inherit.identifiers() {
-          if !scope.contains(name.text()) {
-            diagnostics.push(Diagnostic::validation(
-              DiagnosticKind::UndefinedVariable,
-              Severity::Error,
-              name.range(),
-              name.kind(),
-            ));
-          }
+        return;
+      }
+      for component in inherit.attributes() {
+        if let Some(name) = component.static_name()
+          && !scope.contains(&name)
+        {
+          diagnostics.push(Diagnostic::validation(
+            DiagnosticKind::UndefinedVariable,
+            Severity::Error,
+            component.range(),
+            component_kind(component),
+          ));
         }
       }
     },
@@ -691,36 +747,33 @@ fn collect_entry_names<'doc, 'src: 'doc>(
   for entry in entries {
     match entry {
       AttributeEntry::Binding(binding) => {
-        if let Some(path) = binding.path()
-          && let Some(name) = first_static_component(path)
+        if let Some(name) = binding
+          .path()
+          .and_then(|path| path.components().next())
+          .and_then(AttributeComponent::static_name)
         {
           names.push(name);
         }
       },
       AttributeEntry::Inherit(inherit) => {
-        names
-          .extend(inherit.identifiers().map(|name| Cow::Borrowed(name.text())))
+        names.extend(
+          inherit
+            .attributes()
+            .filter_map(AttributeComponent::static_name),
+        );
       },
     }
   }
   names
 }
 
-fn first_static_component<'doc, 'src: 'doc>(
-  path: AttributePath<'doc, 'src>,
-) -> Option<Cow<'src, str>> {
-  match path.components().next()? {
-    AttributeComponent::Identifier(token) => Some(Cow::Borrowed(token.text())),
-    AttributeComponent::String(string) => static_string(string.syntax().text()),
-    AttributeComponent::Interpolation(_) => None,
-  }
-}
-
-/// Names in the base static scope of Nix 2.35, sorted for binary search.
+/// Names in the base static scope of Nix 2.36, sorted for binary search.
 ///
 /// These are the identifiers every Nix expression may reference without a
 /// binding: the constants, the builtins exposed at top level, and their
-/// `__`-prefixed aliases.
+/// `__`-prefixed aliases. Names that Nix only defines with an experimental
+/// feature or setting enabled (flakes, `fetch-closure`, unsafe native code)
+/// are included, since the parser cannot know the evaluator's settings.
 pub const BASE_GLOBALS: &[&str] = &[
   "__add",
   "__addDrvOutputDependencies",
@@ -753,9 +806,9 @@ pub const BASE_GLOBALS: &[&str] = &[
   "__filter",
   "__filterSource",
   "__findFile",
+  "__flakeRefToString",
   "__floor",
-  "__foldl",
-  "__forceLazyFetcherAttr",
+  "__foldl'",
   "__fromJSON",
   "__functionArgs",
   "__genList",
@@ -763,6 +816,7 @@ pub const BASE_GLOBALS: &[&str] = &[
   "__getAttr",
   "__getContext",
   "__getEnv",
+  "__getFlake",
   "__groupBy",
   "__hasAttr",
   "__hasContext",
@@ -790,6 +844,7 @@ pub const BASE_GLOBALS: &[&str] = &[
   "__nixVersion",
   "__outputOf",
   "__parseDrvName",
+  "__parseFlakeRef",
   "__partition",
   "__path",
   "__pathExists",
@@ -828,7 +883,6 @@ pub const BASE_GLOBALS: &[&str] = &[
   "derivationStrict",
   "dirOf",
   "false",
-  "fetchFinalTree",
   "fetchGit",
   "fetchMercurial",
   "fetchTarball",

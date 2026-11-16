@@ -158,83 +158,83 @@ impl<'src> Parser<'src> {
     if !self.enter_nesting() {
       return self.nesting_error();
     }
-    let expression = self.parse_function();
+    // Lambda, `assert`, `with`, `let ... in`, and `if ... else` end in an
+    // expression in tail position. Their heads are parsed here in a loop and
+    // their tails share this nesting level, so long chains such as
+    // `assert a; assert b; ...` or `x: y: ...` cost one level, not one each.
+    let mut pending = Vec::new();
+    while let Some(head) = self.parse_tail_head() {
+      pending.push(head);
+    }
+    let mut expression = self.parse_pipe();
+    while let Some((marker, kind)) = pending.pop() {
+      expression = self.complete(marker, kind);
+    }
     self.depth -= 1;
     expression
   }
 
-  fn parse_function(&mut self) -> CompletedMarker {
-    if self.at(SyntaxKind::Identifier) && self.nth_kind(1) == SyntaxKind::Colon
-    {
-      let marker = self.start();
-      self.bump();
-      self.bump();
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::Lambda);
+  /// Parses everything of a construct up to its tail expression.
+  ///
+  /// Returns the open node and its kind, or `None` when the current token
+  /// does not start a construct with a tail expression.
+  fn parse_tail_head(&mut self) -> Option<(Marker, SyntaxKind)> {
+    let kind = match self.current.kind() {
+      SyntaxKind::Identifier
+        if match self.nth_kind(1) {
+          SyntaxKind::Colon => true,
+          SyntaxKind::At => self.nth_kind(2) == SyntaxKind::LeftBrace,
+          _ => false,
+        } =>
+      {
+        SyntaxKind::Lambda
+      },
+      SyntaxKind::LeftBrace if self.looks_like_formal_set() => {
+        SyntaxKind::Lambda
+      },
+      SyntaxKind::AssertKeyword => SyntaxKind::Assert,
+      SyntaxKind::WithKeyword => SyntaxKind::With,
+      SyntaxKind::LetKeyword if self.nth_kind(1) != SyntaxKind::LeftBrace => {
+        SyntaxKind::LetIn
+      },
+      SyntaxKind::IfKeyword => SyntaxKind::IfThenElse,
+      _ => return None,
+    };
+    let marker = self.start();
+    match kind {
+      SyntaxKind::Lambda if self.at(SyntaxKind::Identifier) => {
+        self.bump();
+        if self.eat(SyntaxKind::At) {
+          self.parse_formal_set();
+        }
+        self.expect(SyntaxKind::Colon);
+      },
+      SyntaxKind::Lambda => {
+        self.parse_formal_set();
+        if self.eat(SyntaxKind::At) {
+          self.expect(SyntaxKind::Identifier);
+        }
+        self.expect(SyntaxKind::Colon);
+      },
+      SyntaxKind::Assert | SyntaxKind::With => {
+        self.bump();
+        self.parse_expression();
+        self.expect(SyntaxKind::Semicolon);
+      },
+      SyntaxKind::LetIn => {
+        self.bump();
+        self.parse_bindings(SyntaxKind::InKeyword);
+        self.expect(SyntaxKind::InKeyword);
+      },
+      _ => {
+        self.bump();
+        self.parse_expression();
+        self.expect(SyntaxKind::ThenKeyword);
+        self.parse_expression();
+        self.expect(SyntaxKind::ElseKeyword);
+      },
     }
-    if self.at(SyntaxKind::Identifier)
-      && self.nth_kind(1) == SyntaxKind::At
-      && self.nth_kind(2) == SyntaxKind::LeftBrace
-    {
-      let marker = self.start();
-      self.bump();
-      self.bump();
-      self.parse_formal_set();
-      self.expect(SyntaxKind::Colon);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::Lambda);
-    }
-    if self.at(SyntaxKind::LeftBrace) && self.looks_like_formal_set() {
-      let marker = self.start();
-      self.parse_formal_set();
-      if self.eat(SyntaxKind::At) {
-        self.expect(SyntaxKind::Identifier);
-      }
-      self.expect(SyntaxKind::Colon);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::Lambda);
-    }
-    if self.at(SyntaxKind::AssertKeyword) {
-      let marker = self.start();
-      self.bump();
-      self.parse_expression();
-      self.expect(SyntaxKind::Semicolon);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::Assert);
-    }
-    if self.at(SyntaxKind::WithKeyword) {
-      let marker = self.start();
-      self.bump();
-      self.parse_expression();
-      self.expect(SyntaxKind::Semicolon);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::With);
-    }
-    if self.at(SyntaxKind::LetKeyword)
-      && self.nth_kind(1) != SyntaxKind::LeftBrace
-    {
-      let marker = self.start();
-      self.bump();
-      self.parse_bindings(SyntaxKind::InKeyword);
-      self.expect(SyntaxKind::InKeyword);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::LetIn);
-    }
-    self.parse_if()
-  }
-
-  fn parse_if(&mut self) -> CompletedMarker {
-    if self.at(SyntaxKind::IfKeyword) {
-      let marker = self.start();
-      self.bump();
-      self.parse_expression();
-      self.expect(SyntaxKind::ThenKeyword);
-      self.parse_expression();
-      self.expect(SyntaxKind::ElseKeyword);
-      self.parse_expression();
-      return self.complete(marker, SyntaxKind::IfThenElse);
-    }
-    self.parse_pipe()
+    Some((marker, kind))
   }
 
   fn parse_pipe(&mut self) -> CompletedMarker {
@@ -283,6 +283,9 @@ impl<'src> Parser<'src> {
         self.parse_application()
       };
 
+    // Binding power of the last infix operator applied at this level, used to
+    // reject chains of Nix's non-associative comparison operators.
+    let mut previous = None;
     loop {
       if self.at(SyntaxKind::Question) {
         if 11 < minimum {
@@ -292,6 +295,7 @@ impl<'src> Parser<'src> {
         self.bump();
         self.parse_attribute_path();
         left = self.complete(marker, SyntaxKind::HasAttribute);
+        previous = None;
         continue;
       }
       let Some((left_binding, right_binding)) =
@@ -302,6 +306,20 @@ impl<'src> Parser<'src> {
       if left_binding < minimum {
         break;
       }
+      if is_non_associative(self.current.kind())
+        && previous == Some(left_binding)
+      {
+        // Nix declares `==`/`!=` and `<`/`>`/`<=`/`>=` `%nonassoc`, so
+        // `a == b != c` and `a < b < c` are syntax errors. Keep the
+        // left-associative tree for recovery.
+        self.diagnostics.push(Diagnostic::syntax(
+          DiagnosticKind::UnexpectedToken,
+          self.current.range(),
+          None,
+          self.current.kind(),
+        ));
+      }
+      previous = Some(left_binding);
       let marker = self.precede(left);
       self.bump();
       self.parse_operator(right_binding);
@@ -510,7 +528,13 @@ impl<'src> Parser<'src> {
   fn parse_attribute(&mut self) {
     match self.current.kind() {
       SyntaxKind::Identifier | SyntaxKind::OrKeyword => self.bump(),
-      SyntaxKind::Quote | SyntaxKind::IndentedQuote => {
+      SyntaxKind::Quote => {
+        self.parse_string();
+      },
+      SyntaxKind::IndentedQuote => {
+        // Nix's `string_attr` only accepts double-quoted strings; keep the
+        // indented string in the tree for recovery.
+        self.error_expected(Some(SyntaxKind::Identifier));
         self.parse_string();
       },
       SyntaxKind::InterpolationStart => {
@@ -692,6 +716,18 @@ fn infix_binding(kind: SyntaxKind) -> Option<(u8, u8)> {
     SyntaxKind::Concatenate => (10, 10),
     _ => return None,
   })
+}
+
+fn is_non_associative(kind: SyntaxKind) -> bool {
+  matches!(
+    kind,
+    SyntaxKind::Equal
+      | SyntaxKind::NotEqual
+      | SyntaxKind::Less
+      | SyntaxKind::Greater
+      | SyntaxKind::LessEqual
+      | SyntaxKind::GreaterEqual
+  )
 }
 
 fn starts_primary(kind: SyntaxKind) -> bool {
