@@ -1,5 +1,9 @@
 use core::{
   fmt,
+  hash::{
+    Hash,
+    Hasher,
+  },
   iter::FusedIterator,
 };
 
@@ -256,6 +260,99 @@ impl<'src> Document<'src> {
       .all(|diagnostic| diagnostic.severity() != Severity::Error)
   }
 
+  /// Returns the token or tokens touching `offset`.
+  ///
+  /// An offset strictly inside a token yields [`TokenAtOffset::Single`]. An
+  /// offset on the boundary between two tokens yields
+  /// [`TokenAtOffset::Between`]. The start and end of the source yield the
+  /// first and last token, and offsets past the end yield
+  /// [`TokenAtOffset::None`].
+  #[must_use]
+  pub fn token_at_offset(&self, offset: TextSize) -> TokenAtOffset<'_, 'src> {
+    let right = self.token_containing(offset);
+    let left = offset
+      .get()
+      .checked_sub(1)
+      .and_then(|before| self.token_containing(TextSize::new(before)));
+    match (left, right) {
+      (Some(left), Some(right)) if left == right => TokenAtOffset::Single(left),
+      (Some(left), Some(right)) => TokenAtOffset::Between(left, right),
+      (Some(token), None) | (None, Some(token)) => TokenAtOffset::Single(token),
+      (None, None) => TokenAtOffset::None,
+    }
+  }
+
+  /// Returns the smallest element whose range contains `range`.
+  ///
+  /// When several children contain an empty range on a token boundary, the
+  /// earliest one is chosen. Ranges outside the source yield the root.
+  #[must_use]
+  pub fn covering_element(&self, range: TextRange) -> Element<'_, 'src> {
+    let mut node = self.root();
+    loop {
+      let child = node
+        .children()
+        .take_while(|child| child.range().start() <= range.start())
+        .find(|child| child.range().contains_range(range));
+      match child {
+        Some(Element::Node(child)) => node = child,
+        Some(Element::Token(token)) => return Element::Token(token),
+        None => return Element::Node(node),
+      }
+    }
+  }
+
+  fn token_containing(&self, offset: TextSize) -> Option<TokenNode<'_, 'src>> {
+    let mut node = self.root();
+    loop {
+      let child = node
+        .children()
+        .take_while(|child| child.range().start() <= offset)
+        .find(|child| child.range().contains(offset))?;
+      match child {
+        Element::Node(child) => node = child,
+        Element::Token(token) => return Some(token),
+      }
+    }
+  }
+
+  fn element_at(&self, index: u32) -> Option<Element<'_, 'src>> {
+    if index == NONE {
+      return None;
+    }
+    self.element(ElementId::new(index))
+  }
+
+  fn previous_sibling_index(&self, id: ElementId) -> u32 {
+    let parent = self.raw(id).parent();
+    if parent == NONE || parent == id.get() - 1 {
+      return NONE;
+    }
+    let mut candidate = id.get() - 1;
+    loop {
+      let candidate_parent = self.raw(ElementId::new(candidate)).parent();
+      if candidate_parent == parent {
+        return candidate;
+      }
+      candidate = candidate_parent;
+    }
+  }
+
+  fn subtree_end(&self, id: ElementId) -> u32 {
+    let mut current = id.get();
+    loop {
+      let raw = self.raw(ElementId::new(current));
+      let sibling = raw.next_sibling();
+      if sibling != NONE {
+        return sibling;
+      }
+      current = raw.parent();
+      if current == NONE {
+        return self.elements.len as u32;
+      }
+    }
+  }
+
   pub(crate) fn raw(&self, id: ElementId) -> &RawElement {
     self
       .elements
@@ -328,6 +425,56 @@ impl<'doc, 'src> Element<'doc, 'src> {
       Self::Node(node) => node.parent(),
       Self::Token(token) => Some(token.parent()),
     }
+  }
+
+  /// Returns the node, or `None` for a token.
+  #[must_use]
+  pub const fn as_node(self) -> Option<Node<'doc, 'src>> {
+    match self {
+      Self::Node(node) => Some(node),
+      Self::Token(_) => None,
+    }
+  }
+
+  /// Returns the token, or `None` for a node.
+  #[must_use]
+  pub const fn as_token(self) -> Option<TokenNode<'doc, 'src>> {
+    match self {
+      Self::Node(_) => None,
+      Self::Token(token) => Some(token),
+    }
+  }
+
+  /// Returns the following node or token with the same parent.
+  #[must_use]
+  pub fn next_sibling(self) -> Option<Self> {
+    match self {
+      Self::Node(node) => node.next_sibling(),
+      Self::Token(token) => token.next_sibling(),
+    }
+  }
+
+  /// Returns the preceding node or token with the same parent.
+  #[must_use]
+  pub fn prev_sibling(self) -> Option<Self> {
+    match self {
+      Self::Node(node) => node.prev_sibling(),
+      Self::Token(token) => token.prev_sibling(),
+    }
+  }
+}
+
+impl PartialEq for Element<'_, '_> {
+  fn eq(&self, other: &Self) -> bool {
+    self.id() == other.id()
+  }
+}
+
+impl Eq for Element<'_, '_> {}
+
+impl Hash for Element<'_, '_> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.id().hash(state);
   }
 }
 
@@ -427,6 +574,68 @@ impl<'doc, 'src> Node<'doc, 'src> {
       }
     })
   }
+
+  /// Iterates over the node's ancestors, from its parent up to the root.
+  #[must_use]
+  pub fn ancestors(self) -> Ancestors<'doc, 'src> {
+    Ancestors {
+      next: self.parent(),
+    }
+  }
+
+  /// Iterates over every node and token below this node in preorder.
+  ///
+  /// Trivia tokens are included. The node itself is not.
+  #[must_use]
+  pub fn descendants(self) -> Descendants<'doc, 'src> {
+    Descendants {
+      document: self.document,
+      next:     self.id.get() + 1,
+      end:      self.document.subtree_end(self.id),
+    }
+  }
+
+  /// Returns the first token below this node, including trivia.
+  #[must_use]
+  pub fn first_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.descendants().find_map(Element::as_token)
+  }
+
+  /// Returns the last token below this node, including trivia.
+  #[must_use]
+  pub fn last_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.descendants().rev().find_map(Element::as_token)
+  }
+
+  /// Returns the following node or token with the same parent.
+  #[must_use]
+  pub fn next_sibling(self) -> Option<Element<'doc, 'src>> {
+    self
+      .document
+      .element_at(self.document.raw(self.id).next_sibling())
+  }
+
+  /// Returns the preceding node or token with the same parent.
+  #[must_use]
+  pub fn prev_sibling(self) -> Option<Element<'doc, 'src>> {
+    self
+      .document
+      .element_at(self.document.previous_sibling_index(self.id))
+  }
+}
+
+impl PartialEq for Node<'_, '_> {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id
+  }
+}
+
+impl Eq for Node<'_, '_> {}
+
+impl Hash for Node<'_, '_> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+  }
 }
 
 /// A lexical token in a parsed document.
@@ -481,7 +690,163 @@ impl<'doc, 'src> TokenNode<'doc, 'src> {
       id:       ElementId::new(self.document.raw(self.id).parent()),
     }
   }
+
+  /// Iterates over the token's ancestors, from its parent up to the root.
+  #[must_use]
+  pub fn ancestors(self) -> Ancestors<'doc, 'src> {
+    Ancestors {
+      next: Some(self.parent()),
+    }
+  }
+
+  /// Returns the following node or token with the same parent.
+  #[must_use]
+  pub fn next_sibling(self) -> Option<Element<'doc, 'src>> {
+    self
+      .document
+      .element_at(self.document.raw(self.id).next_sibling())
+  }
+
+  /// Returns the preceding node or token with the same parent.
+  #[must_use]
+  pub fn prev_sibling(self) -> Option<Element<'doc, 'src>> {
+    self
+      .document
+      .element_at(self.document.previous_sibling_index(self.id))
+  }
+
+  /// Returns the next token in document order, including trivia.
+  #[must_use]
+  pub fn next_token(self) -> Option<Self> {
+    let document = self.document;
+    (self.id.get() + 1..document.elements.len as u32).find_map(|index| {
+      let id = ElementId::new(index);
+      document
+        .raw(id)
+        .kind
+        .is_token()
+        .then_some(Self { document, id })
+    })
+  }
+
+  /// Returns the previous token in document order, including trivia.
+  #[must_use]
+  pub fn prev_token(self) -> Option<Self> {
+    let document = self.document;
+    (0..self.id.get()).rev().find_map(|index| {
+      let id = ElementId::new(index);
+      document
+        .raw(id)
+        .kind
+        .is_token()
+        .then_some(Self { document, id })
+    })
+  }
 }
+
+impl PartialEq for TokenNode<'_, '_> {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id
+  }
+}
+
+impl Eq for TokenNode<'_, '_> {}
+
+impl Hash for TokenNode<'_, '_> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+  }
+}
+
+/// The tokens touching a source offset, as returned by
+/// [`Document::token_at_offset`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenAtOffset<'doc, 'src> {
+  /// No token touches the offset.
+  None,
+  /// One token contains or touches the offset.
+  Single(TokenNode<'doc, 'src>),
+  /// The offset is the boundary between two adjacent tokens.
+  Between(TokenNode<'doc, 'src>, TokenNode<'doc, 'src>),
+}
+
+impl<'doc, 'src> TokenAtOffset<'doc, 'src> {
+  /// Returns the token, preferring the left one on a boundary.
+  #[must_use]
+  pub const fn left_biased(self) -> Option<TokenNode<'doc, 'src>> {
+    match self {
+      Self::None => None,
+      Self::Single(token) | Self::Between(token, _) => Some(token),
+    }
+  }
+
+  /// Returns the token, preferring the right one on a boundary.
+  #[must_use]
+  pub const fn right_biased(self) -> Option<TokenNode<'doc, 'src>> {
+    match self {
+      Self::None => None,
+      Self::Single(token) | Self::Between(_, token) => Some(token),
+    }
+  }
+}
+
+/// An iterator over the ancestors of a syntax element.
+#[derive(Clone, Debug)]
+pub struct Ancestors<'doc, 'src> {
+  next: Option<Node<'doc, 'src>>,
+}
+
+impl<'doc, 'src> Iterator for Ancestors<'doc, 'src> {
+  type Item = Node<'doc, 'src>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    let node = self.next?;
+    self.next = node.parent();
+    Some(node)
+  }
+}
+
+impl FusedIterator for Ancestors<'_, '_> {}
+
+/// A preorder iterator over the nodes and tokens below a syntax node.
+#[derive(Clone, Debug)]
+pub struct Descendants<'doc, 'src> {
+  document: &'doc Document<'src>,
+  next:     u32,
+  end:      u32,
+}
+
+impl<'doc, 'src> Iterator for Descendants<'doc, 'src> {
+  type Item = Element<'doc, 'src>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.next >= self.end {
+      return None;
+    }
+    let index = self.next;
+    self.next += 1;
+    self.document.element_at(index)
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let len = self.end.saturating_sub(self.next) as usize;
+    (len, Some(len))
+  }
+}
+
+impl DoubleEndedIterator for Descendants<'_, '_> {
+  fn next_back(&mut self) -> Option<Self::Item> {
+    if self.next >= self.end {
+      return None;
+    }
+    self.end -= 1;
+    self.document.element_at(self.end)
+  }
+}
+
+impl ExactSizeIterator for Descendants<'_, '_> {}
+
+impl FusedIterator for Descendants<'_, '_> {}
 
 /// An iterator over the immediate children of a syntax node.
 #[derive(Clone, Debug)]

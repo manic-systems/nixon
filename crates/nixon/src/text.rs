@@ -1,4 +1,10 @@
-use core::fmt;
+use core::{
+  fmt,
+  ops::{
+    Add,
+    Sub,
+  },
+};
 
 /// A byte offset into a Nix source file.
 #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -27,6 +33,40 @@ impl TextSize {
   }
 }
 
+impl From<u32> for TextSize {
+  fn from(value: u32) -> Self {
+    Self(value)
+  }
+}
+
+impl From<TextSize> for u32 {
+  fn from(value: TextSize) -> Self {
+    value.0
+  }
+}
+
+impl From<TextSize> for usize {
+  fn from(value: TextSize) -> Self {
+    value.as_usize()
+  }
+}
+
+impl Add for TextSize {
+  type Output = Self;
+
+  fn add(self, rhs: Self) -> Self {
+    Self(self.0 + rhs.0)
+  }
+}
+
+impl Sub for TextSize {
+  type Output = Self;
+
+  fn sub(self, rhs: Self) -> Self {
+    Self(self.0 - rhs.0)
+  }
+}
+
 impl fmt::Debug for TextSize {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     self.0.fmt(formatter)
@@ -34,7 +74,9 @@ impl fmt::Debug for TextSize {
 }
 
 /// A half-open byte range in a Nix source file.
-#[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
+///
+/// Ranges order by start offset, then by end offset.
+#[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextRange {
   start: TextSize,
   end:   TextSize,
@@ -75,6 +117,62 @@ impl TextRange {
   #[must_use]
   pub const fn is_empty(self) -> bool {
     self.start.get() == self.end.get()
+  }
+
+  /// Returns whether `offset` lies in the range, excluding its end.
+  #[must_use]
+  pub const fn contains(self, offset: TextSize) -> bool {
+    self.start.get() <= offset.get() && offset.get() < self.end.get()
+  }
+
+  /// Returns whether `offset` lies in the range, including its end.
+  #[must_use]
+  pub const fn contains_inclusive(self, offset: TextSize) -> bool {
+    self.start.get() <= offset.get() && offset.get() <= self.end.get()
+  }
+
+  /// Returns whether `other` lies entirely within the range.
+  #[must_use]
+  pub const fn contains_range(self, other: Self) -> bool {
+    self.start.get() <= other.start.get() && other.end.get() <= self.end.get()
+  }
+
+  /// Returns the overlap of two ranges, or `None` if they are disjoint.
+  ///
+  /// Ranges that only touch intersect in an empty range.
+  #[must_use]
+  pub const fn intersect(self, other: Self) -> Option<Self> {
+    let start = if self.start.get() > other.start.get() {
+      self.start
+    } else {
+      other.start
+    };
+    let end = if self.end.get() < other.end.get() {
+      self.end
+    } else {
+      other.end
+    };
+    if start.get() <= end.get() {
+      Some(Self::new(start, end))
+    } else {
+      None
+    }
+  }
+
+  /// Returns the smallest range covering both ranges.
+  #[must_use]
+  pub const fn cover(self, other: Self) -> Self {
+    let start = if self.start.get() < other.start.get() {
+      self.start
+    } else {
+      other.start
+    };
+    let end = if self.end.get() > other.end.get() {
+      self.end
+    } else {
+      other.end
+    };
+    Self::new(start, end)
   }
 }
 

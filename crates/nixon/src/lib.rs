@@ -34,12 +34,16 @@ pub use text::{
   TextSize,
 };
 pub use tree::{
+  Ancestors,
+  Descendants,
   Document,
   Element,
   ElementId,
   Node,
+  TokenAtOffset,
   TokenNode,
 };
+pub use validation::BASE_GLOBALS;
 
 /// Maximum recursive syntax nesting accepted by the parser and validator.
 ///

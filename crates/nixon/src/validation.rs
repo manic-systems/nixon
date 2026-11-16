@@ -716,7 +716,12 @@ fn first_static_component<'doc, 'src: 'doc>(
   }
 }
 
-const BASE_GLOBALS: &[&str] = &[
+/// Names in the base static scope of Nix 2.35, sorted for binary search.
+///
+/// These are the identifiers every Nix expression may reference without a
+/// binding: the constants, the builtins exposed at top level, and their
+/// `__`-prefixed aliases.
+pub const BASE_GLOBALS: &[&str] = &[
   "__add",
   "__addDrvOutputDependencies",
   "__addErrorContext",

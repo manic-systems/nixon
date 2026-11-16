@@ -1,9 +1,12 @@
 //! Typed views over Nixon's lossless syntax tree.
 
+use std::borrow::Cow;
+
 use crate::{
   Element,
   Node,
   SyntaxKind,
+  TextRange,
   TokenNode,
   tree::Children,
 };
@@ -152,6 +155,20 @@ impl<'doc, 'src> AstNode<'doc, 'src> for Expression<'doc, 'src> {
   }
 }
 
+impl<'doc, 'src> Expression<'doc, 'src> {
+  /// Returns the expression's byte range, including leading trivia.
+  #[must_use]
+  pub fn range(self) -> TextRange {
+    self.syntax().range()
+  }
+
+  /// Returns the original text covered by the expression.
+  #[must_use]
+  pub fn text(self) -> &'src str {
+    self.syntax().text()
+  }
+}
+
 impl<'doc, 'src> Root<'doc, 'src> {
   /// Returns the root expression.
   #[must_use]
@@ -170,6 +187,20 @@ impl<'doc, 'src> Literal<'doc, 'src> {
         Element::Node(_) | Element::Token(_) => None,
       }
     })
+  }
+
+  /// Returns the kind of the literal token.
+  #[must_use]
+  pub fn kind(self) -> Option<SyntaxKind> {
+    self.token().map(TokenNode::kind)
+  }
+
+  /// Returns the identifier token if the literal is an identifier.
+  #[must_use]
+  pub fn identifier(self) -> Option<TokenNode<'doc, 'src>> {
+    self
+      .token()
+      .filter(|token| token.kind() == SyntaxKind::Identifier)
   }
 }
 
@@ -222,6 +253,12 @@ impl<'doc, 'src> AttributeSet<'doc, 'src> {
   pub fn is_recursive(self) -> bool {
     self.0.token(SyntaxKind::RecKeyword).is_some()
   }
+
+  /// Returns the `rec` keyword, if present.
+  #[must_use]
+  pub fn rec_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::RecKeyword)
+  }
 }
 
 impl<'doc, 'src> LetIn<'doc, 'src> {
@@ -234,6 +271,18 @@ impl<'doc, 'src> LetIn<'doc, 'src> {
   #[must_use]
   pub fn body(self) -> Option<Expression<'doc, 'src>> {
     expression_children(self.0).last()
+  }
+
+  /// Returns the `let` keyword.
+  #[must_use]
+  pub fn let_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::LetKeyword)
+  }
+
+  /// Returns the `in` keyword.
+  #[must_use]
+  pub fn in_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::InKeyword)
   }
 }
 
@@ -275,6 +324,18 @@ impl<'doc, 'src> Binding<'doc, 'src> {
   pub fn value(self) -> Option<Expression<'doc, 'src>> {
     expression_children(self.0).next()
   }
+
+  /// Returns the `=` token.
+  #[must_use]
+  pub fn assign_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::Assign)
+  }
+
+  /// Returns the terminating `;` token.
+  #[must_use]
+  pub fn semicolon_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::Semicolon)
+  }
 }
 
 impl<'doc, 'src> Inherit<'doc, 'src> {
@@ -295,6 +356,32 @@ impl<'doc, 'src> Inherit<'doc, 'src> {
       }
     })
   }
+
+  /// Iterates over all inherited names, including quoted and dynamic ones.
+  ///
+  /// The parenthesized source expression is skipped.
+  pub fn attributes(
+    self,
+  ) -> impl Iterator<Item = AttributeComponent<'doc, 'src>> {
+    let mut skip_source = false;
+    self.0.children().filter_map(move |element| {
+      if element.kind() == SyntaxKind::LeftParen {
+        skip_source = true;
+        return None;
+      }
+      if skip_source && element.as_node().is_some() {
+        skip_source = false;
+        return None;
+      }
+      AttributeComponent::cast(element)
+    })
+  }
+
+  /// Returns the terminating `;` token.
+  #[must_use]
+  pub fn semicolon_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::Semicolon)
+  }
 }
 
 impl<'doc, 'src> AttributePath<'doc, 'src> {
@@ -302,25 +389,7 @@ impl<'doc, 'src> AttributePath<'doc, 'src> {
   pub fn components(
     self,
   ) -> impl Iterator<Item = AttributeComponent<'doc, 'src>> {
-    self.0.children().filter_map(|element| {
-      match element {
-        Element::Token(token)
-          if matches!(
-            token.kind(),
-            SyntaxKind::Identifier | SyntaxKind::OrKeyword
-          ) =>
-        {
-          Some(AttributeComponent::Identifier(token))
-        },
-        Element::Node(node) if node.kind() == SyntaxKind::String => {
-          Some(AttributeComponent::String(StringExpression(node)))
-        },
-        Element::Node(node) if node.kind() == SyntaxKind::Interpolation => {
-          Some(AttributeComponent::Interpolation(Interpolation(node)))
-        },
-        Element::Node(_) | Element::Token(_) => None,
-      }
-    })
+    self.0.children().filter_map(AttributeComponent::cast)
   }
 }
 
@@ -333,6 +402,107 @@ pub enum AttributeComponent<'doc, 'src> {
   String(StringExpression<'doc, 'src>),
   /// A dynamic `${...}` component.
   Interpolation(Interpolation<'doc, 'src>),
+}
+
+impl<'doc, 'src> AttributeComponent<'doc, 'src> {
+  fn cast(element: Element<'doc, 'src>) -> Option<Self> {
+    match element {
+      Element::Token(token)
+        if matches!(
+          token.kind(),
+          SyntaxKind::Identifier | SyntaxKind::OrKeyword
+        ) =>
+      {
+        Some(Self::Identifier(token))
+      },
+      Element::Node(node) if node.kind() == SyntaxKind::String => {
+        Some(Self::String(StringExpression(node)))
+      },
+      Element::Node(node) if node.kind() == SyntaxKind::Interpolation => {
+        Some(Self::Interpolation(Interpolation(node)))
+      },
+      Element::Node(_) | Element::Token(_) => None,
+    }
+  }
+
+  /// Returns the component's byte range.
+  ///
+  /// Node components include leading trivia.
+  #[must_use]
+  pub fn range(self) -> TextRange {
+    match self {
+      Self::Identifier(token) => token.range(),
+      Self::String(string) => string.syntax().range(),
+      Self::Interpolation(interpolation) => interpolation.syntax().range(),
+    }
+  }
+
+  /// Returns the attribute name if it is known without evaluation.
+  ///
+  /// Identifiers yield their text and double-quoted strings without
+  /// interpolation yield their value with escapes resolved. Interpolations,
+  /// interpolated strings, and indented strings, which Nix does not accept as
+  /// attribute names, yield `None`.
+  #[must_use]
+  pub fn static_name(self) -> Option<Cow<'src, str>> {
+    match self {
+      Self::Identifier(token) => Some(Cow::Borrowed(token.text())),
+      Self::String(string) => static_string_value(string),
+      Self::Interpolation(_) => None,
+    }
+  }
+}
+
+fn static_string_value<'src>(
+  string: StringExpression<'_, 'src>,
+) -> Option<Cow<'src, str>> {
+  let mut children = string.syntax().children();
+  let delimiter = children
+    .by_ref()
+    .find(|element| !element.kind().is_trivia())?;
+  if delimiter.kind() != SyntaxKind::Quote {
+    return None;
+  }
+  let mut value: Option<Cow<'src, str>> = None;
+  for element in children {
+    match element.kind() {
+      SyntaxKind::StringFragment => {
+        let fragment = unescape_string(element.text());
+        value = Some(match value {
+          None => fragment,
+          Some(mut value) => {
+            value.to_mut().push_str(&fragment);
+            value
+          },
+        });
+      },
+      SyntaxKind::Quote => break,
+      _ => return None,
+    }
+  }
+  Some(value.unwrap_or(Cow::Borrowed("")))
+}
+
+fn unescape_string(text: &str) -> Cow<'_, str> {
+  if !text.contains('\\') {
+    return Cow::Borrowed(text);
+  }
+  let mut result = String::with_capacity(text.len());
+  let mut chars = text.chars();
+  while let Some(character) = chars.next() {
+    if character != '\\' {
+      result.push(character);
+      continue;
+    }
+    match chars.next() {
+      Some('n') => result.push('\n'),
+      Some('r') => result.push('\r'),
+      Some('t') => result.push('\t'),
+      Some(other) => result.push(other),
+      None => result.push('\\'),
+    }
+  }
+  Cow::Owned(result)
 }
 
 impl<'doc, 'src> FormalSet<'doc, 'src> {
@@ -380,6 +550,28 @@ impl<'doc, 'src> Lambda<'doc, 'src> {
   pub fn argument(self) -> Option<TokenNode<'doc, 'src>> {
     self.0.token(SyntaxKind::Identifier)
   }
+
+  /// Returns the argument of a simple `x: body` function.
+  #[must_use]
+  pub fn simple_argument(self) -> Option<TokenNode<'doc, 'src>> {
+    if self.at_token().is_some() || self.formal_set().is_some() {
+      return None;
+    }
+    self.argument()
+  }
+
+  /// Returns the alias in `x @ { ... }: body` or `{ ... } @ x: body`.
+  #[must_use]
+  pub fn alias(self) -> Option<TokenNode<'doc, 'src>> {
+    self.at_token()?;
+    self.argument()
+  }
+
+  /// Returns the `@` token, if present.
+  #[must_use]
+  pub fn at_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::At)
+  }
 }
 
 macro_rules! expression_accessors {
@@ -420,6 +612,12 @@ impl<'doc, 'src> Select<'doc, 'src> {
   #[must_use]
   pub fn default(self) -> Option<Expression<'doc, 'src>> {
     expression_children(self.0).nth(1)
+  }
+
+  /// Returns the `or` keyword introducing the default, if present.
+  #[must_use]
+  pub fn or_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::OrKeyword)
   }
 }
 
@@ -565,6 +763,20 @@ impl<'doc, 'src> IfThenElse<'doc, 'src> {
 
 expression_accessors!(Assert, condition, body);
 expression_accessors!(With, scope, body);
+
+impl<'doc, 'src> With<'doc, 'src> {
+  /// Returns the `with` keyword.
+  #[must_use]
+  pub fn with_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::WithKeyword)
+  }
+
+  /// Returns the `;` token after the scope expression.
+  #[must_use]
+  pub fn semicolon_token(self) -> Option<TokenNode<'doc, 'src>> {
+    self.0.token(SyntaxKind::Semicolon)
+  }
+}
 
 impl<'doc, 'src> Parenthesized<'doc, 'src> {
   /// Returns the inner expression.
